@@ -58,14 +58,16 @@ local FS = 44100
 NATIVE SKIN. The screen is the stock Radio one with the EQ laid over it, rather
 than a black panel that happens to live on the device.
 
-The wallpaper is the skin's own bb_encore.png, blitted by us every frame: it is
-exactly 320x240 so it needs no scaling, and Canvas does not clear between frames
-(jive/ui/Canvas.lua:39 just calls the render function), so something has to paint
-the full area regardless. Doing it ourselves avoids depending on what the Window
-style paints underneath.
+The wallpaper is NOT drawn here. Framework:setBackground puts it beneath every
+window on the device, which is why every other screen shows it without painting
+it. We only draw the EQ over the top, translucent, so the wallpaper reads
+through -- the alpha byte is the whole point of these colour constants.
 
-Everything over it is translucent, so the wallpaper reads through -- the alpha
-byte is the whole point of these constants.
+⛔ We used to blit our own copy of bb_encore.png every frame, believing the
+Canvas needed clearing. That redundant paint is what stopped the stock slide
+transitions working: a transition draws the outgoing window at offset -x and the
+incoming one at screenWidth - x, and an opaque full-screen repaint from inside
+the Canvas simply covered the animation.
 ]]
 --[[
 BUILD STAMP, shown in the corner of the status bar.
@@ -80,8 +82,6 @@ of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
 local BUILD = 15
-
-local WALLPAPER = "applets/SetupWallpaper/wallpaper/bb_encore.png"
 
 local C_BAR       = 0x000000C4     -- title / status strips
 local C_BAR_EDGE  = 0xFFFFFF26
@@ -462,18 +462,24 @@ function _redraw(self, srf)
 	local on = s.enabled and not (s.bassGain == 0 and s.trebGain == 0)
 
 	--[[
-	The wallpaper IS the background. Blitting it also clears the frame, which
-	Canvas does not do for us.
+	⛔ DO NOT PAINT THE WALLPAPER HERE. The framework already does.
 
-	If it failed to load we fall back to a flat fill rather than skipping the
-	paint: an unpainted Canvas shows the previous frame smeared over itself,
-	which looks like a crash rather than a missing image.
+	This used to blit bb_encore.png full-screen every frame, on the belief that
+	the Canvas needed clearing. It does not: Framework:setBackground (C side)
+	draws the wallpaper beneath every window, every frame -- which is why every
+	other screen on the device shows it without drawing it.
+
+	The redundant copy broke the slide transitions. Window's defaults are already
+	transitionPushLeft on show and transitionPushRight on hide (Window.lua:159),
+	and tieAndShowWindow passes no override, so we always had them. But a
+	transition animates by drawing the outgoing window at offset -x and the
+	incoming one at screenWidth - x, then LAYER_FRAME back at 0,0. An opaque
+	full-screen repaint from inside the Canvas simply covered the animation, so
+	the screen appeared to cut rather than slide.
+
+	Leaving the background to the framework restores the stock slide, and saves a
+	320x240 blit per frame.
 	]]
-	if self.wall then
-		self.wall:blit(srf, 0, 0)
-	else
-		srf:filledRectangle(0, 0, sw, sh, 0x0E1413FF)
-	end
 
 	---------------------------------------------------------------- title bar
 	srf:filledRectangle(0, 0, sw, TITLE_H, C_BAR)
@@ -669,17 +675,9 @@ function settingsShow(self, menuItem)
 	self.fontTitle = Font:load("fonts/FreeSansBold.ttf", 14)
 	self.fontVal   = Font:load("fonts/FreeSansBold.ttf", 15)
 
-	--[[
-	The skin's own wallpaper, blitted as our background. It is exactly 320x240
-	(measured), so no scaling is needed.
-
-	pcall because a missing or unreadable image must not take the screen down --
-	_redraw falls back to a flat fill. Loaded once here, never on the knob path;
-	an image decode belongs on the knob path no more than a process spawn does.
-	]]
-	local okWall, wall = pcall(function() return Surface:loadImage(WALLPAPER) end)
-	self.wall = okWall and wall or nil
-	if not okWall then log:warn("SBRadioEQ: wallpaper failed to load: ", tostring(wall)) end
+	-- No wallpaper is loaded here any more: the framework draws the background
+	-- beneath every window. See the note in _redraw -- our own copy of it was
+	-- what broke the slide transitions.
 
 	--[[
 	FAIL CLOSED WITHOUT baby_bsp.
