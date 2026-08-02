@@ -1,0 +1,5 @@
+SBRADIOEQ
+	EN	Equalizer
+
+SBRADIOEQ_HELP
+	EN	Two-band equalizer using the Radio's built-in audio processor.

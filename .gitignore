@@ -1,0 +1,20 @@
+# Editor / OS noise
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Deploy scratch
+*.tmp
+/tmp/
+
+# Design mockups.
+#
+# These embed the Radio's stock bb_encore.png wallpaper as a base64 data URI so
+# they render offline. That artwork is Logitech / Slim Devices firmware, and
+# publishing it here would be redistributing it — so the mockups stay local.
+#
+# Nothing is lost from the applet: it loads that wallpaper from the device at
+# runtime and ships no copy of it.
+design/*.html

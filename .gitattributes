@@ -1,0 +1,11 @@
+# Everything here ends up on a Linux device or is run by a POSIX shell, so LF is
+# the correct ending regardless of who checks it out. Without this, a Windows
+# clone gets CRLF and tools/deploy.sh fails with an unhelpful error about a
+# carriage return.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.lua  text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.js   text eol=lf
