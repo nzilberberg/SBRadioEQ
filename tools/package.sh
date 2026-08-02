@@ -95,6 +95,30 @@ nested=$(echo "$listing" | grep '/' || true)
 SHA1=$(sha1sum "$DIST/$ZIPNAME" | cut -d' ' -f1)
 SHA256=$(sha256sum "$DIST/$ZIPNAME" | cut -d' ' -f1)
 
+# ---- where the archive will live -----------------------------------------
+#
+# Derived from the git remote, not typed in: a placeholder that has to be edited
+# by hand before the descriptor works is a step that gets forgotten, and the
+# failure is silent -- LMS just cannot fetch it.
+#
+# GitHub serves release assets over HTTPS, and a tagged release asset is
+# immutable, which is what the SHA-1 below depends on. Override with BASE_URL if
+# hosting elsewhere; it must be https.
+if [ -z "$BASE_URL" ]; then
+	origin=$(git -C "$HERE" remote get-url origin 2>/dev/null || echo "")
+	slug=$(echo "$origin" | sed -e 's#^git@github.com:#https://github.com/#' \
+	                            -e 's#\.git$##')
+	[ -n "$slug" ] || { echo "FAIL: no git remote and no BASE_URL set"; exit 1; }
+	BASE_URL="$slug/releases/download/v$VERSION"
+fi
+case "$BASE_URL" in
+	https://*) ;;
+	*) echo "FAIL: BASE_URL must be https -- a plain-HTTP repository lets anything"
+	   echo "      on the path swap the archive, and the SHA-1 in the descriptor is"
+	   echo "      no defence when the descriptor came down the same wire."
+	   exit 1 ;;
+esac
+
 # ---- repository descriptor ----------------------------------------------
 # target="baby" -- the coefficient controls exist on the Radio's AIC3104 and
 # nowhere else, so this must not offer itself to a Touch or Controller.
@@ -111,7 +135,7 @@ cat > "$DIST/repo.xml" <<XML
       <desc lang="EN">Two-band parametric EQ using the Radio's AIC3104 hardware effects filter. Adjusted with the knob; no CPU cost and no server required.</desc>
       <creator>nzilberberg</creator>
       <email>nzilberberg@gmail.com</email>
-      <url>REPLACE_WITH_HTTPS_URL/$ZIPNAME</url>
+      <url>$BASE_URL/$ZIPNAME</url>
       <sha>$SHA1</sha>
     </applet>
   </applets>
@@ -127,11 +151,9 @@ echo "  files at root       : $(echo $RUNTIME | wc -w)"
 echo "  sha1   (repo.xml)   : $SHA1"
 echo "  sha256 (published)  : $SHA256"
 echo ""
-echo "STILL TO DO BY HAND:"
-echo "  1. edit dist/repo.xml and replace REPLACE_WITH_HTTPS_URL with the real"
-echo "     https:// location the archive will be served from"
-echo "  2. upload the archive to that location, unchanged -- the SHA-1 above"
-echo "     describes THIS file; re-zipping produces a different one"
-echo "  3. serve repo.xml over https too"
-echo "  4. in LMS: Settings > Plugins > Additional Repositories, add the repo.xml"
-echo "     URL; then install from the Radio's Applet Installer"
+echo "publish with:"
+echo "  gh release create v$VERSION dist/$ZIPNAME dist/repo.xml dist/SHA256SUMS \\"
+echo "     --title \"SBRadioEQ $VERSION\" --notes-file <notes>"
+echo ""
+echo "then add this URL under LMS > Settings > Plugins > Additional Repositories:"
+echo "  $BASE_URL/repo.xml"
