@@ -79,7 +79,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 11
+local BUILD = 13
 
 local WALLPAPER = "applets/SetupWallpaper/wallpaper/bb_encore.png"
 
@@ -782,8 +782,15 @@ function settingsShow(self, menuItem)
 	return window
 end
 
+--[[
+The service is registered by the META, not here -- see SBRadioEQMeta.lua.
+
+Registering it from init() could never have worked: applets load lazily, so this
+does not run until something opens the screen, while the boot-time re-apply
+happens long before that. It also passed `self` where an applet NAME was
+expected, so even once loaded the service resolved to nothing.
+]]
 function init(self)
-	appletManager:registerService(self, "sbRadioEQApply")
 end
 
 function sbRadioEQApply(self)

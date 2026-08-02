@@ -47,6 +47,33 @@ function registerApplet(meta)
 		return
 	end
 
+	--[[
+	⛔ THE SERVICE IS REGISTERED HERE, NOT FROM Applet:init().
+
+	It used to be registered in the applet's own init with
+
+	    appletManager:registerService(self, "sbRadioEQApply")
+
+	which was broken twice over, and the result was that the saved curve was
+	never restored at boot while the comments claimed it was:
+
+	  * WRONG ARGUMENT. AppletManager:registerService(self, appletName, service)
+	    wants the applet NAME. Passing `self` stored the applet OBJECT, so
+	    callService's `loadApplet(_appletName)` was handed an object, failed, and
+	    returned nil -- silently, because callService just `return`s when it
+	    cannot resolve. (Verified on-device: AppletManager.lua:806-815.)
+
+	  * TOO LATE. Applets are loaded lazily, so init() does not run until
+	    something opens the applet. configureApplet() fires at startup
+	    (AppletManager.lua:325, after registerApplet at :318) and called a service
+	    nobody had registered yet.
+
+	meta:registerService passes self._entry.appletName for us (AppletMeta.lua:163),
+	and registerApplet runs before configureApplet, so the service exists by the
+	time boot asks for it.
+	]]
+	meta:registerService("sbRadioEQApply")
+
 	jiveMain:addItem(meta:menuItem('appletSBRadioEQ', 'settingsAudio', "SBRADIOEQ",
 		function(applet, ...) applet:settingsShow(...) end))
 end

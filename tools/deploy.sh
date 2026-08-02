@@ -138,7 +138,19 @@ echo "requires resolved: $(echo $found | tr '\n' ' ')"
 #
 if [ "$restart" = yes ]; then
 	oldpids=$($SSH "$RADIO" "pidof jive" 2>/dev/null || echo "")
-	$SSH "$RADIO" "/etc/init.d/squeezeplay stop >/dev/null 2>&1" || true
+
+	# ⛔ stopwdog, NOT stop.
+	#
+	# `stop` DELETES /var/run/squeezeplay.pid. The watchdog polls that file every
+	# 5 seconds (interval=5 in /etc/watchdog.conf) and treats a missing pidfile as
+	# a failure -- it runs repair.sh and lets the hardware watchdog REBOOT the
+	# Radio. This script holds the process down for well over 5 s while it swaps
+	# the directory, so using `stop` rebooted the device on every deploy.
+	#
+	# `stopwdog` exists for exactly this: it stops SqueezePlay and parks a
+	# `sleep 1h` pid in the pidfile so the watchdog stays satisfied while work
+	# happens. The placeholder is cleared just before start, below.
+	$SSH "$RADIO" "/etc/init.d/squeezeplay stopwdog >/dev/null 2>&1" || true
 	$SSH "$RADIO" "
 	  for i in 1 2 3 4 5 6 7 8 9 10; do
 	    pidof jive >/dev/null 2>&1 || break
@@ -172,7 +184,17 @@ $SSH "$RADIO" "
 echo "installed atomically: $(echo $MANIFEST | wc -w) files"
 
 if [ "$restart" = yes ]; then
-	$SSH "$RADIO" "/etc/init.d/squeezeplay start >/dev/null 2>&1" || true
+	# Release the watchdog placeholder and start in one go. `start` refuses if the
+	# pidfile holds a LIVING pid, and stopwdog deliberately left a `sleep 1h`
+	# there -- so the placeholder must be killed first. Doing both in a single
+	# remote command keeps the window where no pidfile exists sub-second, well
+	# inside the watchdog's 5 s interval.
+	$SSH "$RADIO" "
+	  P=\$(cat /var/run/squeezeplay.pid 2>/dev/null)
+	  if [ -n \"\$P\" ]; then kill \$P 2>/dev/null; fi
+	  rm -f /var/run/squeezeplay.pid
+	  /etc/init.d/squeezeplay start >/dev/null 2>&1
+	" >/dev/null 2>&1 || true
 
 	# Poll rather than sample once: a single check at 22 s reported "not running"
 	# on a device that was simply still coming up, and a false failure sends you
@@ -189,6 +211,9 @@ if [ "$restart" = yes ]; then
 		echo "FAIL: $count jive instances after start ($newpids) -- rolling back"
 		$SSH "$RADIO" "
 		  if [ -d $DEST.old ]; then rm -rf $DEST; mv $DEST.old $DEST; sync; fi
+		  P=\$(cat /var/run/squeezeplay.pid 2>/dev/null)
+		  if [ -n \"\$P\" ] && kill -0 \$P 2>/dev/null; then kill \$P 2>/dev/null; fi
+		  rm -f /var/run/squeezeplay.pid
 		  /etc/init.d/squeezeplay start >/dev/null 2>&1
 		" >/dev/null 2>&1 || true
 		echo "  previous version restored; check the device"
