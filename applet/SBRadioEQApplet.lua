@@ -79,7 +79,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 14
+local BUILD = 15
 
 local WALLPAPER = "applets/SetupWallpaper/wallpaper/bb_encore.png"
 
@@ -300,9 +300,25 @@ would otherwise drift a little further out of true on every single adjustment.
 appliedAtten persists in settings, so a boot that re-applies the same curve
 computes a zero delta and leaves the volume alone instead of jumping it.
 ]]
-function _levelMatch(self)
+--[[
+TARGET IS PASSED IN, NOT READ FROM self.attenDb.
+
+self.attenDb is the make-up the CURVE needs. Whether it should be applied right
+now is a different question -- while bypassed the answer is zero -- and
+_applyNow used to express that by overwriting self.attenDb with 0.
+
+That broke un-bypassing. Toggling bypass calls _applyNow directly, never
+_design, so nothing recomputed the value: bypass zeroed it and dropping the
+filter correctly lowered the volume, but un-bypassing then read the same zero,
+computed a delta of zero, and left the volume down. The curve came back and the
+level did not.
+
+So the curve's make-up is now written in exactly one place (_design) and the
+momentary target is a parameter. Nothing else may overwrite it.
+]]
+function _levelMatch(self, target)
 	local s = self:getSettings()
-	local target  = self.attenDb or 0
+	target        = target or self.attenDb or 0
 	local applied = s.appliedAtten or 0
 	local delta   = target - applied
 
@@ -313,21 +329,27 @@ function _levelMatch(self)
 	-- syslog I/O belongs on the knob path no more than a process spawn does.
 	-- It did its job -- the level-matching fault it was chasing is recorded in
 	-- the project notes.
-	if math.abs(delta) < 0.4 then return end
+	delta = U.levelDelta(target, applied)
+	if not delta then return end
 	if not player or not cur then return end
 
-	local newVol = D.dbToVolume(D.volumeToDb(cur) + delta)
+	local fromDb = D.volumeToDb(cur)
+	local newVol = D.dbToVolume(fromDb + delta)
 	if newVol == cur then return end
 	player:volume(newVol, true)
 
-	-- record what we actually achieved, not what we asked for
-	s.appliedAtten = applied + (D.volumeToDb(newVol) - D.volumeToDb(cur))
+	-- Record what was ACHIEVED, not what was asked for.
+	s.appliedAtten = U.levelAchieved(applied, fromDb, D.volumeToDb(newVol))
 end
 
 function _applyNow(self)
 	local s = self:getSettings()
 	local bypass = (not s.enabled) or (s.bassGain == 0 and s.trebGain == 0)
-	if bypass then self.attenDb = 0 end
+
+	-- While bypassed the filter applies no cut, so no make-up is owed. This is a
+	-- MOMENTARY target, not a change to the curve's own figure -- overwriting
+	-- self.attenDb here is what stopped un-bypass restoring the volume.
+	local target = bypass and 0 or (self.attenDb or 0)
 	--[[
 	⛔ NOTHING ADVANCES UNTIL THE HARDWARE CONFIRMS.
 
@@ -357,7 +379,7 @@ function _applyNow(self)
 		self.written = { c1 = self.c1, c2 = self.c2 }
 		self.writtenBypass = bypass
 		self.hwError = nil
-		self:_levelMatch()
+		self:_levelMatch(target)
 		return
 	end
 
@@ -793,7 +815,34 @@ function settingsShow(self, menuItem)
 			moved the player volume, so appliedAtten comes back with them and the
 			curve is re-applied to put the hardware where the numbers say it is.
 			]]
-			U.restoreSnapshot(self:getSettings(), self.snap)
+			local s = self:getSettings()
+
+			--[[
+			PUT THE VOLUME BACK TOO, not just the numbers.
+
+			appliedAtten is bookkeeping ABOUT the player volume, not a copy of
+			it. Live editing moves the real volume -- drop a +15 band to 0 and
+			the volume comes down ~15 dB to match -- so restoring appliedAtten
+			while leaving the volume down asserts 15 dB of make-up that is not
+			there. Reported from the device: "the gain level comes back but
+			without the volume match adjustment."
+
+			Undo exactly what this edit applied, rather than snapping to a
+			remembered volume, so a manual volume change made mid-edit survives.
+			]]
+			local player     = Player:getLocalPlayer()
+			local cur        = player and player:getVolume()
+			local appliedNow = s.appliedAtten or 0
+
+			U.restoreSnapshot(s, self.snap)
+
+			if player and cur then
+				local wantDb = U.cancelVolumeDb(D.volumeToDb(cur), appliedNow,
+				                                s.appliedAtten or 0)
+				local newVol = D.dbToVolume(wantDb)
+				if newVol ~= cur then player:volume(newVol, true) end
+			end
+
 			self.snap    = nil
 			self.editing = false
 			self:_design()

@@ -165,4 +165,69 @@ function M.restoreSnapshot(s, snap)
 	return true
 end
 
+--[[
+Where the VOLUME has to go when an edit is cancelled.
+
+Restoring appliedAtten alone is not enough, and is actively wrong: appliedAtten
+is bookkeeping ABOUT the player volume, not a copy of it. Live editing moves the
+real volume -- drop a +15 band to 0 and the volume comes down ~15 dB to match --
+so putting the number back while leaving the volume down claims 15 dB of make-up
+that is not there. The curve returns and the level does not.
+
+Undo exactly what THIS EDIT applied, rather than snapping to a remembered
+volume: appliedAtten is the running total of the make-up we have added, so the
+difference between now and the snapshot is our contribution and nothing else.
+Anything the user did to the volume knob mid-edit is left alone, because it is
+not in that difference.
+
+All in dB; the caller converts to and from the player's own scale.
+]]
+function M.cancelVolumeDb(currentVolumeDb, appliedNow, appliedAtSnapshot)
+	local ours = (appliedNow or 0) - (appliedAtSnapshot or 0)
+	return (currentVolumeDb or 0) - ours
+end
+
+--[[
+LEVEL MATCHING, as two pure steps.
+
+THE INVARIANT, which both of this project's volume bugs broke:
+
+    appliedAtten must always equal the make-up actually folded into the
+    player's volume.
+
+It is bookkeeping about the real volume, so anything that changes one without
+the other makes it a lie, and every later decision is computed from the lie.
+Both failures were that:
+
+  * cancelling an edit restored appliedAtten but left the volume where the live
+    edits had moved it;
+  * bypass overwrote the curve's make-up with 0, so un-bypassing computed a
+    delta of zero and never brought the volume back.
+
+Splitting it means the arithmetic can be tested over SEQUENCES of operations
+rather than one call at a time, which is where drift shows up.
+
+Below one volume step there is nothing to gain from moving, and chasing
+fractions would jitter the volume during a sweep.
+]]
+M.VOLUME_STEP_DB = 0.4
+
+-- How far the volume should move, or nil when it is not worth moving.
+function M.levelDelta(target, applied)
+	local delta = (target or 0) - (applied or 0)
+	if delta < M.VOLUME_STEP_DB and delta > -M.VOLUME_STEP_DB then return nil end
+	return delta
+end
+
+--[[
+What is now folded into the volume, after a move from fromDb to toDb.
+
+Recorded from what was ACHIEVED, not what was asked for: volume steps are
+0.49 dB apart above setting 25, so asking for +3.0 and getting +2.96 would drift
+a little further out of true on every adjustment.
+]]
+function M.levelAchieved(applied, fromDb, toDb)
+	return (applied or 0) + ((toDb or 0) - (fromDb or 0))
+end
+
 return M
