@@ -67,4 +67,102 @@ function M.nextCell(cell, delta, count)
 	return ((cell - 1 + M.selectStep(delta)) % count) + 1
 end
 
+--[[
+=============================================================================
+CONTROL POLICY
+
+These moved out of the applet so the TESTS EXERCISE PRODUCTION CODE. The
+headroom and nudge tests used to reimplement this logic, because the applet
+cannot be loaded outside Jive -- which meant they stayed green no matter what
+the applet actually did. A test that reproduces the behaviour it is checking
+proves only that the reproduction is self-consistent.
+=============================================================================
+]]
+
+-- What each control can be, and how far one click moves it.
+M.RANGE = {
+	bassFreq = { lo = 100,  hi = 800,   kind = "freq" },
+	trebFreq = { lo = 1000, hi = 16000, kind = "freq" },
+	bassGain = { lo = -15,  hi = 15,    kind = "gain" },
+	trebGain = { lo = -15,  hi = 15,    kind = "gain" },
+	bassQ    = { lo = 0.2,  hi = 2.0,   kind = "q"    },
+	trebQ    = { lo = 0.2,  hi = 2.0,   kind = "q"    },
+}
+
+--[[
+One click of the knob on a value. Frequency moves proportionally (4%), gain and
+Q by a fixed step; everything clamps to its range.
+
+⚠️ `1.04 ^ delta` is parenthesised deliberately. This platform's Lua binds `^`
+LOWER than `*`, so `v * 1.04 ^ delta` would compute `(v * 1.04) ^ delta`.
+]]
+function M.stepValue(key, v, delta)
+	local r = M.RANGE[key]
+	if not r then return v end
+
+	if r.kind == "freq" then
+		v = v * (1.04 ^ delta)
+	elseif r.kind == "gain" then
+		v = v + delta * 0.5
+	else
+		v = v + delta * 0.05
+	end
+
+	if v < r.lo then v = r.lo end
+	if v > r.hi then v = r.hi end
+	if r.kind == "freq" then v = math.floor(v + 0.5) end
+	return v
+end
+
+--[[
+How much make-up the volume can still give, measured from the user's own base
+level: the current volume ALREADY contains appliedAtten dB of make-up, so the
+ceiling is everything between here and full scale plus what is already spent.
+
+volumeDb is the player's volume expressed in dB (negative below full scale).
+]]
+function M.headroomDb(appliedAtten, volumeDb)
+	return (appliedAtten or 0) - (volumeDb or 0)
+end
+
+-- Can a curve costing attenDb be paid for out of budget? The tolerance absorbs
+-- the last fractional dB so a step is not refused for a rounding hair.
+function M.affordable(attenDb, budget)
+	return (attenDb or 0) <= (budget or 0) + 0.01
+end
+
+-- Only a boost has to be afforded. A cut demands no make-up and must ALWAYS be
+-- permitted, or a user who has run out of headroom is trapped at that setting.
+function M.mustCheckAffordability(key, newValue, oldValue)
+	local r = M.RANGE[key]
+	if not r or r.kind ~= "gain" then return false end
+	return newValue > oldValue
+end
+
+--[[
+EDIT SNAPSHOT -- what Back restores.
+
+Editing applies live, on every click, because that is the whole point of the
+control. So "cancel" cannot mean "do not apply"; it has to mean "put back what
+was there". Without this, Back merely left edit mode and the changed value was
+then saved on exit -- Back read as cancel and behaved as accept.
+
+appliedAtten is captured too: the live edits moved the player volume, and
+restoring the values without restoring the level accounting leaves the volume
+compensating for a curve that is no longer set.
+]]
+function M.snapshot(s)
+	local t = {}
+	for k in pairs(M.RANGE) do t[k] = s[k] end
+	t.appliedAtten = s.appliedAtten
+	t.enabled      = s.enabled
+	return t
+end
+
+function M.restoreSnapshot(s, snap)
+	if not snap then return false end
+	for k, v in pairs(snap) do s[k] = v end
+	return true
+end
+
 return M

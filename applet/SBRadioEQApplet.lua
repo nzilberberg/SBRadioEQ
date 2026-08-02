@@ -79,7 +79,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 13
+local BUILD = 14
 
 local WALLPAPER = "applets/SetupWallpaper/wallpaper/bb_encore.png"
 
@@ -578,24 +578,7 @@ end
 function _nudge(self, delta)
 	local s   = self:getSettings()
 	local key = CELLS[self.cell].key
-	local v   = s[key]
-
-	if string.find(key, "Freq") then
-		v = v * (1.04 ^ delta)
-		local lo = (self.cell <= 3) and 100 or 1000
-		local hi = (self.cell <= 3) and 800 or 16000
-		if v < lo then v = lo end
-		if v > hi then v = hi end
-		v = math.floor(v + 0.5)
-	elseif string.find(key, "Gain") then
-		v = v + delta * 0.5
-		if v < -15 then v = -15 end
-		if v >  15 then v =  15 end
-	else
-		v = v + delta * 0.05
-		if v < 0.2 then v = 0.2 end
-		if v > 2.0 then v = 2.0 end
-	end
+	local v   = U.stepValue(key, s[key], delta)
 
 	--[[
 	THE REAL CEILING: headroom, not the coefficient format.
@@ -621,12 +604,12 @@ function _nudge(self, delta)
 	]]
 	local before = s[key]
 	s[key] = v
-	if string.find(key, "Gain") and v > before then
+	if U.mustCheckAffordability(key, v, before) then
 		local budget = self:_headroomDb()
 		local _, _, i = D.designPair(FS,
 			{ kind = "lowshelf",  f0 = s.bassFreq, gainDb = s.bassGain, shape = s.bassQ },
 			{ kind = "highshelf", f0 = s.trebFreq, gainDb = s.trebGain, shape = s.trebQ })
-		if (i.attenDb or 0) > budget + 0.01 then
+		if not U.affordable(i.attenDb, budget) then
 			s[key]       = before
 			self.limited = true
 			return
@@ -676,8 +659,40 @@ function settingsShow(self, menuItem)
 	self.wall = okWall and wall or nil
 	if not okWall then log:warn("SBRadioEQ: wallpaper failed to load: ", tostring(wall)) end
 
+	--[[
+	FAIL CLOSED WITHOUT baby_bsp.
+
+	The in-process BSP write is ~20 ms for a full apply. The amixer fallback is
+	about 1.1 SECONDS, because every coefficient costs a process spawn -- and
+	_applyNow runs on every knob detent, so the fallback would stall the UI and
+	starve the audio decoder for roughly a second per click. It also cannot
+	report failure usefully, which is how a failed write used to raise the
+	volume.
+
+	It was selected SILENTLY when the module was missing, so a firmware without
+	it would present a control that looks fine and behaves terribly. Refuse
+	instead, and say why: an EQ that says it cannot run here is better than one
+	that appears to work and fights the audio thread.
+
+	The shell path is kept for diagnostics and the boot-time re-apply, where a
+	one-off second does not matter and nothing is being dragged interactively.
+	]]
 	local okbsp, bsp = pcall(require, "baby_bsp")
 	self.bsp = okbsp and bsp or nil
+	if not self.bsp then
+		log:warn("SBRadioEQ: baby_bsp unavailable -- refusing to open the editor")
+		local Textarea = require("jive.ui.Textarea")
+		local w = Window("text_list", menuItem and menuItem.text or "Equalizer",
+		                 'settingstitle')
+		w:addWidget(Textarea("text",
+			"Hardware EQ unavailable on this firmware.\n\n" ..
+			"The in-process mixer module (baby_bsp) is missing, and the fallback " ..
+			"is roughly a second per adjustment -- too slow to edit with, and it " ..
+			"cannot confirm a write succeeded.\n\n" ..
+			"Any EQ already saved is still applied at startup."))
+		self:tieAndShowWindow(w)
+		return w
+	end
 
 	--[[
 	Prime the mute-restore level HERE, once, while the screen is opening --
@@ -749,12 +764,41 @@ function settingsShow(self, menuItem)
 	window:addListener(EVENT_KEY_PRESS, function(event)
 		local k = event:getKeycode()
 		if k == KEY_GO then
-			self.editing = not self.editing
-			if not self.editing then self:_flushApply(); self:storeSettings() end
+			if not self.editing then
+				-- Entering EDIT. Snapshot first: edits apply live, so cancelling
+				-- has to mean "put it back", and there is nothing to put back
+				-- unless it was captured before the first click.
+				self.snap = U.snapshot(self:getSettings())
+				self.editing = true
+			else
+				-- Leaving EDIT by accepting.
+				self.editing = false
+				self.snap = nil
+				self:_flushApply()
+				self:storeSettings()
+			end
 			repaint(self)
 			return EVENT_CONSUME
+
 		elseif k == KEY_BACK and self.editing then
+			--[[
+			BACK CANCELS -- which it did not used to.
+
+			It only cleared self.editing, and since every scroll had already
+			written the new value into settings and pushed it to the codec, the
+			changed value was then saved on window close. Back was documented as
+			cancel and behaved as accept.
+
+			Restoring the values is not enough on its own: the live edits also
+			moved the player volume, so appliedAtten comes back with them and the
+			curve is re-applied to put the hardware where the numbers say it is.
+			]]
+			U.restoreSnapshot(self:getSettings(), self.snap)
+			self.snap    = nil
 			self.editing = false
+			self:_design()
+			self:_flushApply()
+			self:storeSettings()
 			repaint(self)
 			return EVENT_CONSUME
 		end
