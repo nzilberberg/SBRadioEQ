@@ -24,3 +24,6 @@ design/*.html
 # released artifact drift apart, and the SHA-1 in repo.xml describes one exact
 # file.
 /dist/
+
+# Personal device state -- a saved EQ curve is the user's, not the project's.
+backup/
