@@ -119,6 +119,18 @@ Apply two designed bands.
 
 Returns the command that was run, so a caller can log exactly what happened.
 ]]
+--[[
+Shell fallback. Returns a RESULT, not the command string.
+
+⛔ This used to end `M.execute(cmd); return cmd` -- discarding the exit status and
+returning a string, which is always truthy. A caller could not tell a successful
+write from a failed one, and the applet's level compensation ran regardless. Since
+a boost is realised as cut plus volume make-up, a silently failed write meant the
+volume went UP by as much as 27 dB with no attenuation underneath it. That is a
+safety defect, not an error-handling nicety.
+
+os.execute returns the exit status in this Lua; 0 is success.
+]]
 function M.apply(c1, c2, bypass)
 	local cmd
 	if bypass then
@@ -127,8 +139,16 @@ function M.apply(c1, c2, bypass)
 	else
 		cmd = M.buildCommand(c1, c2, M.ENABLE_BOTH)
 	end
-	M.execute(cmd)
-	return cmd
+	local okCall, status = pcall(M.execute, cmd)
+	if not okCall then
+		return { ok = false, cmd = cmd, error = tostring(status),
+		         hardwareStateUnknown = true }
+	end
+	if status ~= 0 and status ~= true then
+		return { ok = false, cmd = cmd, error = "amixer exit " .. tostring(status),
+		         hardwareStateUnknown = true }
+	end
+	return { ok = true, cmd = cmd }
 end
 
 --[[
@@ -325,13 +345,35 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
 				end
 			end
 		end
-		if not anything and prevBypass == false then return 0 end
+		if not anything and prevBypass == false then return { ok = true, writes = 0 } end
 	elseif prevBypass == true then
-		return 0
+		return { ok = true, writes = 0 }
 	end
 
+	--[[
+	⛔ EVERYTHING FROM HERE TO THE RESTORE IS PROTECTED.
+
+	This used to be a bare sequence: mute, write, restore. If ANY setMixer in the
+	middle threw -- a bad control name, a driver error, an unplugged codec -- the
+	restore line was never reached and the Radio stayed MUTED, with no message and
+	no obvious cause. The user's only clue would be silence.
+
+	The test alongside this asserted the mute "must ALWAYS be undone", and passed,
+	because its stub could not throw. It proved the happy path and called it a
+	guarantee. test_faultwrite.lua now injects a throw at every setMixer position.
+
+	Order matters on failure: leave the filter BYPASSED before unmuting. A partial
+	coefficient set describes a filter whose numerator no longer cancels its own
+	denominator, which is the +42 dB resonance measured on 2026-08-01. Unmuting
+	into that is the worst possible outcome, so bypass first, then restore sound.
+	]]
 	local restore = M.mutePoint()
-	bsp:setMixer(M.MUTE_CTL, 0, 0)
+	local okMute = pcall(function() bsp:setMixer(M.MUTE_CTL, 0, 0) end)
+	if not okMute then
+		-- could not even mute; do not proceed to write coefficients live
+		return { ok = false, writes = 0, error = "could not mute",
+		         hardwareStateUnknown = false }
+	end
 
 	--[[
 	KEEP THE BRACKET, even though we are muted. Skipping it to save 2 of 9
@@ -352,10 +394,39 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
 	Bypassing means no intermediate state ever RUNS, so nothing can be excited.
 	That is the property being paid for, and it is not negotiable for 6 ms.
 	]]
-	local n = M.applyBSPDiff(bsp, c1, c2, prev, bypass, prevBypass)
+	local okWrite, n = pcall(M.applyBSPDiff, bsp, c1, c2, prev, bypass, prevBypass)
 
-	bsp:setMixer(M.MUTE_CTL, restore, restore)
-	return n
+	-- A partial coefficient set must never be left RUNNING. Bypass while still
+	-- muted, so nothing is audible even if this also fails.
+	if not okWrite then
+		pcall(function() bsp:setMixer(M.NAME.enable, M.BYPASS) end)
+	end
+
+	--[[
+	ALWAYS attempt the restore, whatever happened above -- and retry it.
+
+	Every other failure here is recoverable by the user: a wrong filter can be
+	adjusted, a bypassed filter still passes audio. Being left MUTED is the one
+	outcome with no obvious cause and no obvious remedy -- the Radio simply goes
+	silent and nothing on screen says why. It is worth three attempts.
+	]]
+	local okRestore = false
+	for _ = 1, 3 do
+		okRestore = pcall(function() bsp:setMixer(M.MUTE_CTL, restore, restore) end)
+		if okRestore then break end
+	end
+
+	if not okWrite then
+		return { ok = false, writes = 0, error = tostring(n),
+		         hardwareStateUnknown = true, restored = okRestore }
+	end
+	if not okRestore then
+		-- Wrote fine but the device is still muted: report it so the caller can
+		-- tell the user, rather than leaving them with silent hardware.
+		return { ok = false, writes = n, error = "mute was not restored",
+		         stillMuted = true, hardwareStateUnknown = false }
+	end
+	return { ok = true, writes = n }
 end
 
 function M.applyBSP(bsp, c1, c2, bypass)

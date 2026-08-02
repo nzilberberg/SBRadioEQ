@@ -86,8 +86,12 @@ ok("every coefficient write sits inside the bracket",
 
 print("=== NO mute when there is nothing to write (this is the stutter guard) ===")
 b = stub()
-local n = A.applyBSPMuted(b, c1, c2, { c1 = c1, c2 = c2 }, false, false)
-ok("no writes at all", n == 0 and #b.seq == 0, tostring(#b.seq) .. " writes")
+-- applyBSPMuted returns a RESULT now, not a bare count: a caller has to be able
+-- to tell a successful write from a failed one before it raises the volume.
+-- See test_faultwrite.lua for the failure paths.
+local r = A.applyBSPMuted(b, c1, c2, { c1 = c1, c2 = c2 }, false, false)
+ok("no writes at all", r.ok == true and r.writes == 0 and #b.seq == 0,
+   string.format("ok=%s writes=%s seq=%d", tostring(r.ok), tostring(r.writes), #b.seq))
 
 print("=== already bypassed and asked to bypass: nothing happens ===")
 b = stub()

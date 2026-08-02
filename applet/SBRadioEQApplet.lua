@@ -79,7 +79,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 9
+local BUILD = 11
 
 local WALLPAPER = "applets/SetupWallpaper/wallpaper/bb_encore.png"
 
@@ -328,20 +328,47 @@ function _applyNow(self)
 	local s = self:getSettings()
 	local bypass = (not s.enabled) or (s.bassGain == 0 and s.trebGain == 0)
 	if bypass then self.attenDb = 0 end
+	--[[
+	⛔ NOTHING ADVANCES UNTIL THE HARDWARE CONFIRMS.
+
+	This used to apply, then unconditionally advance the cache and call
+	_levelMatch(). _levelMatch RAISES THE PLAYER VOLUME to compensate for
+	attenuation the filter is supposed to be applying -- up to 27 dB at full
+	two-band boost. If the write silently failed there was no attenuation to
+	compensate for, so the volume went up over unattenuated audio.
+
+	The shell path made that reachable: it discarded os.execute's status and
+	returned the command string, which is always truthy. A failed write was
+	indistinguishable from a good one.
+
+	So: apply, and only on a confirmed ok do we advance the cache and touch the
+	volume. On failure the cache is CLEARED, not left stale -- the next attempt
+	must write the full set rather than diff against coefficients that may not be
+	in the chip.
+	]]
+	local res
 	if self.bsp then
-		-- Bracketed write, NOT applyBSPLive. Writing coefficients into a running
-		-- filter removes the enable-bit transition -- and with it the codec's
-		-- AUTOMATIC SOFT-MUTE (datasheet 10.3.4.4), which was suppressing the
-		-- click for free. Without it the change hits the filter with the old
-		-- state still in its delay elements, which the user reported as worse
-		-- and more jarring, especially on bass where excursion is largest.
-		A.applyBSPMuted(self.bsp, self.c1, self.c2, self.written, bypass, self.writtenBypass)
+		res = A.applyBSPMuted(self.bsp, self.c1, self.c2, self.written, bypass, self.writtenBypass)
+	else
+		res = A.apply(self.c1, self.c2, bypass)
+	end
+
+	if res and res.ok then
 		self.written = { c1 = self.c1, c2 = self.c2 }
 		self.writtenBypass = bypass
-	else
-		A.apply(self.c1, self.c2, bypass)
+		self.hwError = nil
+		self:_levelMatch()
+		return
 	end
-	self:_levelMatch()
+
+	-- Failure. Do NOT raise the volume, and do not claim to know the chip's state.
+	self.written = nil
+	self.writtenBypass = nil
+	self.hwError = (res and res.error) or "hardware write failed"
+	log:warn("SBEQ-HWFAIL ", self.hwError,
+	         " unknownState=", tostring(res and res.hardwareStateUnknown),
+	         " stillMuted=", tostring(res and res.stillMuted),
+	         " build=", BUILD)
 end
 
 -- NO DEBOUNCE. A 260 ms delay was tried to reduce how often the bypass window is
