@@ -47,6 +47,11 @@ local EVENT_UNUSED    = jive.ui.EVENT_UNUSED
 local KEY_GO          = jive.ui.KEY_GO
 local KEY_BACK        = jive.ui.KEY_BACK
 
+-- Drawing layers. A window transition draws each layer in its own pass, at its
+-- own offset, so a widget has to know which pass it is in. See the note on
+-- self.canvas.draw in settingsShow.
+local LAYER_CONTENT   = jive.ui.LAYER_CONTENT
+
 local appletManager = appletManager
 
 module(..., Framework.constants)
@@ -64,10 +69,13 @@ it. We only draw the EQ over the top, translucent, so the wallpaper reads
 through -- the alpha byte is the whole point of these colour constants.
 
 ⛔ We used to blit our own copy of bb_encore.png every frame, believing the
-Canvas needed clearing. That redundant paint is what stopped the stock slide
-transitions working: a transition draws the outgoing window at offset -x and the
-incoming one at screenWidth - x, and an opaque full-screen repaint from inside
-the Canvas simply covered the animation.
+Canvas needed clearing. It does not, and the copy cost a 320x240 blit per frame
+for nothing.
+
+That was NOT, however, what broke the slide transitions -- removing it made
+sliding OUT work and I wrongly reported it as the cause. The real fault was
+Canvas ignoring the draw layer; see the note on self.canvas.draw in
+settingsShow. Both changes were needed, and only the second one explains it.
 ]]
 --[[
 BUILD STAMP, shown in the corner of the status bar.
@@ -81,7 +89,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 15
+local BUILD = 17
 
 local C_BAR       = 0x000000C4     -- title / status strips
 local C_BAR_EDGE  = 0xFFFFFF26
@@ -469,16 +477,13 @@ function _redraw(self, srf)
 	draws the wallpaper beneath every window, every frame -- which is why every
 	other screen on the device shows it without drawing it.
 
-	The redundant copy broke the slide transitions. Window's defaults are already
-	transitionPushLeft on show and transitionPushRight on hide (Window.lua:159),
-	and tieAndShowWindow passes no override, so we always had them. But a
-	transition animates by drawing the outgoing window at offset -x and the
-	incoming one at screenWidth - x, then LAYER_FRAME back at 0,0. An opaque
-	full-screen repaint from inside the Canvas simply covered the animation, so
-	the screen appeared to cut rather than slide.
+	Removing it also saves a 320x240 blit every frame.
 
-	Leaving the background to the framework restores the stock slide, and saves a
-	320x240 blit per frame.
+	⛔ It did NOT fix the slide transitions, though it was reported that way at
+	the time. Removing it made sliding OUT work, which looked like the answer;
+	sliding IN was still broken, and the actual cause was Canvas ignoring the
+	draw layer -- see the note on self.canvas.draw in settingsShow. Both changes
+	were needed; only that one explains the fault.
 	]]
 
 	---------------------------------------------------------------- title bar
@@ -727,6 +732,39 @@ function settingsShow(self, menuItem)
 	self:_design()
 
 	self.canvas = Canvas('debug_canvas', function(srf) self:_redraw(srf) end)
+
+	--[[
+	⛔ Canvas:draw DROPS THE LAYER ARGUMENT, so it paints in every pass.
+
+	jive/ui/Canvas.lua is `function draw(self, surface) self.render(surface) end`
+	-- it never looks at the layer the framework passes. Every other widget is
+	drawn selectively.
+
+	A transition renders one layer per pass, each at its own offset
+	(Window.lua _transitionPushLeft):
+
+	    offset 0             newWindow:draw(LAYER_LOWER)
+	    offset -x            oldWindow:draw(LAYER_CONTENT | ... | LAYER_TITLE)
+	    offset screenW - x   newWindow:draw(LAYER_CONTENT | ON_STAGE | TITLE)
+	    offset 0             newWindow:draw(LAYER_FRAME)
+
+	Painting in all four means the LAST pass wins, and it is at offset 0 -- so
+	the incoming window appeared instantly at its final position while the old
+	menu slid out from behind it. Exactly what was reported.
+
+	Sliding OUT looked right only by luck: as the OLD window we are drawn once,
+	in the offset pass, so there was nothing to overwrite it.
+
+	Draw only in the content passes -- the ones the transition offsets. The layer
+	is nil-checked so any caller that omits it still gets a paint rather than a
+	blank screen.
+	]]
+	local applet = self
+	self.canvas.draw = function(_, surface, layer)
+		if layer and (layer & LAYER_CONTENT) == 0 then return end
+		applet:_redraw(surface)
+	end
+
 	window:addWidget(self.canvas)
 
 	--[[ INPUT OWNERSHIP ----------------------------------------------------
