@@ -27,3 +27,6 @@ design/*.html
 
 # Personal device state -- a saved EQ curve is the user's, not the project's.
 backup/
+
+# Build/capture output.
+dist/
