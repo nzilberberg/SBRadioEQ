@@ -91,7 +91,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 19
+local BUILD = 20
 
 local C_BAR       = 0x000000C4     -- title / status strips
 local C_BAR_EDGE  = 0xFFFFFF26
@@ -724,10 +724,20 @@ function menuShow(self, menuItem)
 		weight = 4,
 	})
 
-	-- 5. Reset Tone -- leads to a confirm screen. Not built.
+	-- 5. Level Match -- will toggle the make-up gain that compensates for the
+	-- chip's cut-only filter. NOT WIRED; same reasoning as Tone Control above,
+	-- the state is a literal rather than a read of anything real.
+	menu:addItem({
+		text   = self:string("SBRADIOEQ_LEVEL_MATCH"),
+		style  = 'item_choice',
+		weight = 5,
+		check  = Checkbox("checkbox", function(_, _) end, true),
+	})
+
+	-- 6. Reset Tone -- leads to a confirm screen. Not built.
 	menu:addItem({
 		text   = self:string("SBRADIOEQ_RESET"),
-		weight = 5,
+		weight = 6,
 	})
 
 	window:addWidget(menu)
