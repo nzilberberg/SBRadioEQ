@@ -111,13 +111,6 @@ ok("rest of the band is cut instead", near(pHigh, -12, 0.6),
 ok("relative lift is the 12 dB asked for", near(pLow - pHigh, 12, 0.6),
    string.format("%.2f dB", pLow - pHigh))
 
-print("=== G. maxShape falls with frequency ===")
-local q1k  = M.maxShape("peaking", FS, 1000, -6)
-local q100 = M.maxShape("peaking", FS, 100,  -6)
-local q60  = M.maxShape("peaking", FS, 60,   -6)
-ok("Q ceiling 1k >= 100Hz", q1k >= q100, string.format("1k=%.2f 100=%.2f", q1k, q100))
-ok("Q ceiling 100 >= 60Hz", q100 >= q60, string.format("100=%.2f 60=%.2f", q100, q60))
-
 print("=== H. volume curve / headroom ===")
 ok("volume 100 -> 0 dB headroom", near(M.headroomDb(100), 0, 0.01),
    string.format("%.2f", M.headroomDb(100)))

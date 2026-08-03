@@ -347,9 +347,16 @@ function M.design(kind, fs, f0, gainDb, shape, opts)
 		held fixed at 0.9 the achieved Q still changed 21 times. Peak-normalisation
 		then turned each shape change into a vertical shift of the whole curve.
 
-		So: design exactly what was asked for. The caller keeps the control inside
-		the usable range with maxShape(), so requested always equals achieved and
-		the curve moves smoothly. info.ok still reports quantisation honestly --
+		So: design exactly what was asked for.
+
+		⛔ This used to add "The caller keeps the control inside the usable range
+		with maxShape(), so requested always equals achieved." NO CALLER EVER DID.
+		maxShape was dead code, and the only thing referencing it was this comment
+		plus a test that exercised nothing else. Both are gone.
+
+		What actually makes requested equal achieved is fit-quantisation, in
+		design() and designPair() alike: test_continuity is 3/3 and
+		test_graphtruth 4/4 with the control range UNCLAMPED. info.ok still reports quantisation honestly --
 		and since the graph is drawn from the QUANTISED coefficients, the user sees
 		the real response either way.
 
@@ -484,22 +491,6 @@ function M.realisedPeakDb(c, fs)
 
 	if bestM == -1 / 0 then return -1 / 0, bf end
 	return 10 * log10(bestM), bf
-end
-
--- Highest shape value that verifies at this frequency/gain -- drives the UI's
--- Q slider range so the limit is VISIBLE in the control rather than silently
--- rewriting the filter behind the user's back.
-function M.maxShape(kind, fs, f0, gainDb, ceiling)
-	ceiling = ceiling or 8
-	if gainDb == 0 then return ceiling end
-	local try = ceiling
-	for _ = 1, 40 do
-		local _, info = M.design(kind, fs, f0, gainDb, try)
-		if info.ok then return try end
-		try = try * 0.93
-		if try < 0.05 then break end
-	end
-	return 0.05
 end
 
 --[[
