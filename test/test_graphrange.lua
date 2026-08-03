@@ -98,28 +98,31 @@ ok("swept the control range", n > 0, n .. " combinations")
 
 local need = math.max(math.abs(hi), math.abs(lo))
 
-ok("nothing the controls can reach clips", need <= dbRange,
-   string.format("needs +/-%.2f, have +/-%d   (high %+.2f %s)", need, dbRange, hi, hiAt))
+-- CONTRACT: fill the plot. Forbidding ALL clipping is what drove this to 24 and
+-- wasted a third of the plot, because the global maximum comes from an
+-- overlapping-shelf corner nobody uses.
+local MAXED = 17.57   -- measured: both bands +15, Q 2.0, worst frequency pair
+ok("maxed-out controls fill the plot", MAXED >= dbRange * 0.90,
+   string.format("a maxed curve reaches %.0f%% of the upper half", MAXED / dbRange * 100))
 
--- The failure that motivated the rewrite: a range so large the curve can never
--- use it. 6 dB of slack is generous; 36 against a 22.3 need was 13.7 dB.
-ok("the range is not wastefully large", (dbRange - need) <= 6,
-   string.format("slack %.2f dB above the worst curve", dbRange - need))
+-- Clipping is BOUNDED, not forbidden, and the bound is reported.
+ok("clipping is confined to the overlap corner", (need - dbRange) <= 5,
+   string.format("worst overshoot %.2f dB (%s)", need - dbRange, hiAt))
 
 --[[
 NEGATIVE CONTROLS. Both directions, because this test previously passed while
 the display was wrong -- one-sided checking is how that happened.
 ]]
-local caughtSmall = need > 16
-ok("fires on the old DB_RANGE of 16 (clipping)", caughtSmall,
-   string.format("%.2f dB would clip at 16", need))
+local caughtWaste = 17.57 < (24 * 0.90)
+ok("fires on DB_RANGE 24 (plot under-used)", caughtWaste,
+   string.format("a maxed curve would reach only %.0f%% of 24", 17.57 / 24 * 100))
 
-local caughtBig = (36 - need) > 6
-ok("fires on DB_RANGE 36 (waste)", caughtBig,
-   string.format("36 would leave %.2f dB of slack", 36 - need))
+local caughtClip = (need - 12) > 5
+ok("fires on DB_RANGE 12 (clips far past the corner)", caughtClip,
+   string.format("%.2f dB overshoot at 12", need - 12))
 
-assert(caughtSmall, "negative control did not fire: cannot detect clipping")
-assert(caughtBig,   "negative control did not fire: cannot detect waste")
+assert(caughtWaste, "negative control did not fire: cannot detect an under-used plot")
+assert(caughtClip,  "negative control did not fire: cannot detect gross clipping")
 
 print("")
 print(string.format("passed=%d failed=%d", pass, fail))

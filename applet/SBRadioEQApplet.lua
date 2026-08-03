@@ -173,10 +173,36 @@ local F_LO, F_HI = 40, 16000
 --[[
 VERTICAL RANGE. Half-span in dB, so the plot covers -DB_RANGE..+DB_RANGE.
 
-24, was 16, briefly and wrongly 36.
+18. Sized so MAXED-OUT CONTROLS FILL THE PLOT, which is the point of drawing one.
 
-At 16 the curve CLIPPED: the drawing code pins anything beyond the range to
-the frame, so an extreme curve went flat-topped and stopped showing its shape.
+MEASURED: with both bands at +15 dB and Q 2.0, the drawn peak is 15.55..17.57 dB
+across EVERY frequency pair. 18 puts that at 98% of the upper half, so the hump
+reaches the top at maximum settings.
+
+⛔ TWO EARLIER VALUES WERE WRONG, IN OPPOSITE DIRECTIONS, and both were argued
+for confidently:
+
+  36 came from sizing against attenDb (34.76), WHICH THE GRAPH NEVER PLOTS. The
+     two sections are peak-normalised independently at different frequencies, so
+     the top of the curve is attenDb minus the other band's floor.
+
+  24 came from the global sweep maximum of 22.32 dB. That value is real, but it
+     occurs at bass 800 Hz with treble 1000 Hz and treble Q 0.2 -- the two
+     shelves OVERLAPPING into one broad boost. Sizing for that corner left a
+     third of the plot unreachable at every ordinary setting.
+
+So 18 accepts that the overlapping-shelf corner clips, by up to 4.32 dB. That is
+a deliberate trade, confirmed with the user: a curve that fills the graph where
+people actually work, against a flat top at a setting that makes the bass and
+treble controls into the same filter.
+
+COUNTERINTUITIVE, worth stating because it was assumed backwards twice: the peak
+RISES AS Q FALLS. At bass 100 / treble 3k, +15 both, it runs 14.10 dB at Q 0.2
+up to 17.57 at Q 2.0 -- a WIDE shelf overlapping the other band is what makes
+the 22.32 extreme, not a sharp one.
+
+At 16 the curve CLIPPED at ordinary settings too: the drawing code pins anything
+beyond the range to the frame, so it went flat-topped and stopped showing shape.
 
 ⛔ THE PLOTTED PEAK IS NOT attenDb. That mistake set this constant to 36 and
 wasted half the plot. _recomputeCurve draws
@@ -198,7 +224,7 @@ left the rest of the plot unreachable by any setting.
 Gated by test/test_graphrange.lua, which sweeps the control range and fails if
 any reachable setting would clip.
 ]]
-local DB_RANGE   = 24
+local DB_RANGE   = 18
 local NPTS       = 80          -- curve resolution; plenty at 300 px wide
 
 -- Each cell carries its own label: the old layout put "BASS"/"TREB" in a margin
