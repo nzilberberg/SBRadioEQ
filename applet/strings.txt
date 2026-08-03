@@ -13,11 +13,31 @@ SBRADIOEQ_TONE_CONTROL
 SBRADIOEQ_TONE
 	EN	Tone
 
-SBRADIOEQ_LOUDNESS
-	EN	Loudness
-
 SBRADIOEQ_LEVEL_MATCH
 	EN	Level Match
 
+SBRADIOEQ_LEVEL_MATCHING
+	EN	Level Matching
+
+# Deliberately short. It is the header widget above the tick box, and the two
+# together have to fit one screen with no scrolling: 135 px of content once the
+# 45 px menu row is taken, which is five lines at this face. MEASURED at
+# FreeSans 16 wrapped to 285 px -- this wraps to four, leaving one spare.
+# Gated by test/test_textfit.lua; do not lengthen it without re-running that.
+#
+# Three things it has to get right, and an earlier draft got two of them wrong:
+#   UP OR DOWN -- it said "raises the volume". Dropping a boost lowers it again,
+#                 and Reset lowers it by the whole make-up at once.
+#   AS YOU ADJUST -- the matching is live, on every detent, not on save.
+#   the EFFECT -- what the listener notices is that loudness does NOT change.
+SBRADIOEQ_LEVEL_MATCH_DESC
+	EN	As you adjust bass or treble, Level Matching moves the volume up or down to match, so the tone changes without the music getting louder or quieter.
+
 SBRADIOEQ_RESET
 	EN	Reset Tone
+
+SBRADIOEQ_RESET_CANCEL
+	EN	Cancel
+
+SBRADIOEQ_RESET_CONTINUE
+	EN	Continue

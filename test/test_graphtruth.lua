@@ -49,7 +49,7 @@ local F_LO, F_HI, NPTS = 40, 16000, 80
 
 The first version compared the drawn curve against the realised one. That was
 right while the applet drew the IDEAL design. It stopped being a test the moment
-designPair started returning ideal1/ideal2 as float VIEWS OF THE QUANTISED
+designPair started returning realised1/realised2 as float VIEWS OF THE QUANTISED
 INTEGERS: drawn and realised then came from the same numbers, the comparison read
 0.00 dB by construction, and it could no longer fail for any input.
 
@@ -112,7 +112,7 @@ local function drawnVsRealised(bf, bg, bq, tf, tg, tq)
 	for k = 0, NPTS do
 		local f = math.exp(l0 + (l1 - l0) * k / NPTS)
 		local drawn, real = 0, 0
-		for _, id in ipairs({ i.ideal1, i.ideal2 }) do
+		for _, id in ipairs({ i.realised1, i.realised2 }) do
 			if id then drawn = drawn + D.responseDb(id.b0, id.b1, id.b2, id.a1, id.a2, f, FS) end
 		end
 		for _, c in ipairs({ c1, c2 }) do

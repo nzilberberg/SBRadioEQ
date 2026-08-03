@@ -230,4 +230,62 @@ function M.levelAchieved(applied, fromDb, toDb)
 	return (applied or 0) + ((toDb or 0) - (fromDb or 0))
 end
 
+--[[
+THE DEFAULTS -- ONE TABLE, TWO CONSUMERS.
+
+These are both the values a fresh install starts with (SBRadioEQMeta's
+defaultSettings) and the values "Reset Tone" returns to. The user asked for
+those to be the same thing, and the only way they stay the same is for there to
+be one of them. A second copy in the Meta would agree on the day it was written
+and drift on the day one of them was tuned.
+
+WHERE THE NUMBERS COME FROM:
+
+  bassFreq 150   Not a guess. The AIC3104's OWN default coefficients -- read off
+                 the chip with the applet removed, so they are the driver's and
+                 not ours -- decode to a low shelf hinged at ~140 Hz. That is
+                 Logitech's own choice of bass corner for this exact speaker.
+
+  trebFreq 3000  Judgement, and the weaker of the two. Nothing documents a
+                 treble corner for this hardware: the Boom's tone frequencies
+                 live in its closed firmware (the DAC channel is write-only,
+                 there is no read path), its white paper covers bass EXTENSION
+                 rather than the tone control, and its TAS3204 is a programmable
+                 DSP so no datasheet defines it either.
+
+  Q 1.0          MEASURED ceiling. A shelf overshoots above shape 1.0 and the
+                 overshoot is paid for in make-up volume: a +10 dB request costs
+                 10.00 dB at shape 1.0, 10.18 at 1.2 and 10.59 at 1.5. At 1.0
+                 and below the cost tracks the request exactly. Do not raise it.
+
+  gains 0        Two of the three Squeezebox Booms on the author's network sit
+                 at bass 0 / treble 0. Flat is what people actually run.
+]]
+M.DEFAULTS = {
+	enabled      = true,
+	-- Level matching ON by default: without it, turning the bass up makes the
+	-- music quieter, which is what the control looked broken doing before it
+	-- existed. Off is the deliberate choice, not the starting point.
+	levelMatch   = true,
+	bassGain     = 0,
+	bassFreq     = 150,
+	bassQ        = 1.0,
+	trebGain     = 0,
+	trebFreq     = 3000,
+	trebQ        = 1.0,
+	-- How much make-up is folded into the player volume. Zero on a fresh
+	-- install and after a reset, because the reset also takes the volume back
+	-- down -- see resetToDefaults in the applet.
+	appliedAtten = 0,
+}
+
+-- A FRESH copy every time. Handing out M.DEFAULTS itself would let the framework
+-- store settings table alias it, and the next edit would silently rewrite the
+-- defaults -- so a later reset would restore whatever was last set.
+function M.defaults()
+	local t = {}
+	for k, v in pairs(M.DEFAULTS) do t[k] = v end
+	return t
+end
+
 return M

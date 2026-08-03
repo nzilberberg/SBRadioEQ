@@ -28,6 +28,7 @@ local Applet     = require("jive.Applet")
 local Window     = require("jive.ui.Window")
 local SimpleMenu = require("jive.ui.SimpleMenu")
 local Checkbox   = require("jive.ui.Checkbox")
+local Textarea   = require("jive.ui.Textarea")
 local Canvas     = require("jive.ui.Canvas")
 local Surface    = require("jive.ui.Surface")
 local Framework  = require("jive.ui.Framework")
@@ -91,10 +92,8 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 21
+local BUILD = 33
 
-local C_BAR       = 0x000000C4     -- title / status strips
-local C_BAR_EDGE  = 0xFFFFFF26
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
 local C_GRID      = 0xFFFFFF1F
@@ -105,21 +104,29 @@ local C_HILITE    = 0xFFFFFFFF
 local C_LABEL     = 0xFFFFFF8C
 local C_DIM       = 0xFFFFFF9C     -- deliberately secondary: the mode word only
 --[[
-The status hint had been C_DIM at FreeSans 9 and was barely readable on glass.
-Alpha 0x9C is 61%, sitting on a bar that is itself translucent -- so the text was
-losing contrast twice over. Contrast was the bigger problem, not size.
+THE STATUS HINT IS GONE, and with it C_HINT and fontHint.
 
-Fully opaque, and bigger than it sounds like it needs to be. FreeSans 10 was
-tried first and still read as tiny on glass -- 9 to 10 is only 10 px to 12 px of
-rendered height, a change you have to be told about to notice. 13 renders 14 px
-tall and 224 px wide against 308 available, which is a 40% increase over where
-this started.
+It said "turn: select   press: edit   hold: bypass", which is how every screen
+on this device already works -- and it was printed across the framework's own
+battery and wifi icons, because we were drawing a bar exactly on top of theirs.
+Bypass has a real menu item now, so even that half stopped earning its line.
+
+The sizing lesson it taught is worth keeping for any small text here: FreeSans 9
+at 61% alpha, on a translucent bar, lost contrast TWICE and read as unusable on
+glass. Contrast was the bigger problem, not size -- and going 9 to 10 is only
+10 px to 12 px of rendered height, a change you have to be told about to notice.
+Anything meant to be read at arm's length wants to be opaque first, then bigger
+than it sounds like it needs to be.
 ]]
-local C_HINT      = 0xFFFFFFFF
 local C_WARN      = 0xFFD166FF
 local C_MARK_OFF  = 0xFFFFFF40
 local C_CELL      = 0x0000005E
 local C_CELL_EDGE = 0xFFFFFF1C
+-- The UNSELECTED fader row. Lighter than C_PANEL (0x75) on purpose: an
+-- unselected row is background, and at 0x75 it read as a second solid slab
+-- competing with the selected one. At 0x45 the wallpaper carries it and the
+-- selection is what the eye lands on.
+local C_ROW_OFF   = 0x00000045
 local C_OFF       = 0xFFFFFF59
 local C_EDIT_INK  = 0x001F1EFF     -- text on the teal editing cell
 
@@ -130,13 +137,36 @@ local GRAD_BANDS  = 8
 local SEL_TOP,  SEL_BOT  = 0x3D3D3D, 0x0B0B0B
 local EDIT_TOP, EDIT_BOT = 0x3FD0C9, 0x2A8F8B
 
--- Layout, in the 320x240 the device actually has.
-local TITLE_H  = 28
--- 24, not 20: the hint is 14 px tall at FreeSans 13, and a 20 px strip left it
--- 2 px from the screen edge. The cells give up 1 px per row to pay for it.
-local STATUS_H = 24
+--[[
+Layout, in the 320x240 the device actually has.
+
+⛔ WE DRAW NEITHER A TITLE BAR NOR A STATUS BAR. The window already has both,
+and painting our own translucent copies over them is what produced a doubled
+title -- our 28 px bar and its text sitting on the framework's 36 px bar and
+ITS text -- and a hint line printed across the battery and wifi icons.
+
+These two numbers are MEASURED, on the device, off a stock screen (Settings >
+Brightness > Manual Brightness) by scanning the framebuffer for the bar edges,
+rather than assumed:
+
+    rows   0..35   framework title bar   (separator on row 35)
+    rows  36..215  content -- ours
+    rows 216..239  framework iconbar     (clock, battery, wifi)
+
+36 agrees with QVGAbaseSkin's TITLE_HEIGHT, which is the cross-check; the
+iconbar has no constant in the skin, so the measurement is the only source.
+
+We draw ONLY into the content band, plus two small right-aligned strings in the
+title bar's empty half (the headroom readout and the build stamp) -- text with
+no background, so the framework's bar shows through and stays single.
+]]
+local SKIN_TITLE_H   = 36
+local SKIN_ICONBAR_H = 24
 local PAD      = 6
-local GRAPH_H  = 104
+-- 98, was 104. The graph used to start at 30 and ran under the framework's
+-- 36 px title bar. Six pixels back buys the clearance; the option cells give up
+-- one more each, which the tightened label-to-value gap inside them pays back.
+local GRAPH_H  = 98
 local CELL_GAP = 3
 
 local F_LO, F_HI = 40, 16000
@@ -176,7 +206,7 @@ function _design(self)
 		{ kind = "lowshelf",  f0 = s.bassFreq, gainDb = s.bassGain, shape = s.bassQ },
 		{ kind = "highshelf", f0 = s.trebFreq, gainDb = s.trebGain, shape = s.trebQ })
 	self.c1, self.c2 = c1, c2
-	self.ideal1, self.ideal2 = i.ideal1, i.ideal2
+	self.realised1, self.realised2 = i.realised1, i.realised2
 	self.attenDb = i.attenDb or 0
 	self:_check(i.diag)
 	self:_recomputeCurve()
@@ -254,7 +284,7 @@ function _recomputeCurve(self)
 		end
 	end
 	--[[
-	self.ideal1/ideal2 are the REALISED sections -- designPair returns float
+	self.realised1/realised2 are the REALISED sections -- designPair returns float
 	views of the exact integers written to the codec -- so this curve is what the
 	chip does, by construction (test_graphtruth.lua is the specification). An
 	earlier version drew the unquantised design instead; that kept the picture
@@ -272,7 +302,7 @@ function _recomputeCurve(self)
 	change. Purely a display transform -- the coefficients written to the codec
 	are untouched.
 	]]
-	local p, q = self.ideal1, self.ideal2
+	local p, q = self.realised1, self.realised2
 	local offset = self.attenDb or 0
 	local function at(f)
 		local d = offset
@@ -329,6 +359,22 @@ momentary target is a parameter. Nothing else may overwrite it.
 function _levelMatch(self, target)
 	local s = self:getSettings()
 	target        = target or self.attenDb or 0
+
+	--[[
+	⛔ LEVEL MATCHING OFF MEANS TARGET ZERO -- NOT "return early".
+
+	Returning here would leave whatever make-up is already folded into the
+	volume sitting there with nothing compensating for it: turn the feature off
+	after a +15 boost and the music stays 15 dB loud over a curve whose cut the
+	user has just stopped paying for. Same shape as the bypass bug.
+
+	Forcing the target to 0 instead runs the SAME delta/deadband/achieved
+	machinery in reverse, so switching off UNWINDS the existing make-up and none
+	is ever added while it stays off. The move is always downward, which is the
+	safe direction to be wrong in.
+	]]
+	if not s.levelMatch then target = 0 end
+
 	local applied = s.appliedAtten or 0
 	local delta   = target - applied
 
@@ -488,14 +534,18 @@ function _redraw(self, srf)
 	were needed; only that one explains the fault.
 	]]
 
-	---------------------------------------------------------------- title bar
-	srf:filledRectangle(0, 0, sw, TITLE_H, C_BAR)
-	srf:hline(0, sw, TITLE_H, C_BAR_EDGE)
-
-	text(srf, self.fontTitle, C_HILITE, "Equalizer", PAD, 6)
-	local nameW = self.fontTitle:width("Equalizer")
-	local mode  = (not on) and "bypassed" or (self.editing and "editing" or "select")
-	text(srf, self.fontS, C_DIM, mode, PAD + nameW + 6, 8)
+	------------------------------------------- readout, in the framework's bar
+	-- No bar and no title of our own: the window already draws "Equalizer" in
+	-- the skin's own style, and ours underneath it was the doubled text. Only
+	-- the right-hand strings are ours, drawn with NO background so the
+	-- framework's bar shows through unbroken.
+	--
+	-- The mode word ("select"/"editing") is gone with the hint line: turning to
+	-- select and pressing to edit is how every screen on this device works and
+	-- does not need saying.
+	local stamp = "b" .. BUILD
+	textRight(srf, self.fontXS, C_DIM, stamp, sw - PAD, 12)
+	local readoutRight = sw - PAD - self.fontXS:width(stamp) - 8
 
 	--[[
 	Report the make-up against what is left to pay it with, not on its own. "-27"
@@ -504,17 +554,23 @@ function _redraw(self, srf)
 	otherwise a dead-feeling knob reads as the bug the last one actually was.
 	]]
 	if self.limited then
-		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", sw - PAD, 8)
+		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", readoutRight, 11)
 	elseif not on then
-		textRight(srf, self.fontS, C_DIM, "BYP", sw - PAD, 8)
-	elseif self.attenDb and self.attenDb > 0.05 then
+		textRight(srf, self.fontS, C_DIM, "BYP", readoutRight, 11)
+	elseif s.levelMatch and self.attenDb and self.attenDb > 0.05 then
+		-- "-14/82" is make-up spent over make-up available. With level matching
+		-- off neither number is real: nothing is being spent and there is no
+		-- budget, so showing it would be a readout about a mechanism that is
+		-- switched off.
 		textRight(srf, self.fontS, C_TEXT,
 		          string.format("-%.0f/%.0f", self.attenDb, self:_headroomDb()),
-		          sw - PAD, 8)
+		          readoutRight, 11)
 	end
 
 	------------------------------------------------------------------- graph
-	local gx, gy = PAD, TITLE_H + 2
+	-- SKIN_TITLE_H, not our own: the graph used to start at TITLE_H + 2 = 30 and
+	-- ran six pixels underneath the framework's 36 px bar.
+	local gx, gy = PAD, SKIN_TITLE_H + 2
 	local gw, gh = sw - PAD * 2, GRAPH_H
 	local midY   = gy + gh / 2
 
@@ -570,7 +626,10 @@ function _redraw(self, srf)
 
 	------------------------------------------------------------ parameter grid
 	local top    = gy + gh + CELL_GAP
-	local bottom = sh - STATUS_H - 2
+	-- The framework's iconbar owns the last 24 rows. Stopping at our own
+	-- STATUS_H happened to be the same number, which is why the collision was
+	-- invisible: we were drawing a bar exactly on top of theirs.
+	local bottom = sh - SKIN_ICONBAR_H - 2
 	local cw     = math.floor((sw - PAD * 2 - CELL_GAP * 2) / 3)
 	local ch     = math.floor((bottom - top - CELL_GAP) / 2)
 
@@ -593,19 +652,19 @@ function _redraw(self, srf)
 
 		local editing = (i == self.cell and self.editing)
 		text(srf, self.fontXS, editing and 0x00302EFF or C_LABEL,
-		     CELLS[i].lab, x + 4, y + 3)
+		     CELLS[i].lab, x + 2, y + 2)
+		-- ch - 21, was ch - 19. The cells lost a pixel of height to the graph's
+		-- clearance and the label-to-value gap had two spare, so tightening it
+		-- pays that back rather than squeezing the value against the border.
 		text(srf, self.fontVal, editing and C_EDIT_INK or C_HILITE,
-		     self:_fmt(CELLS[i].key), x + 4, y + ch - 19)
+		     self:_fmt(CELLS[i].key), x + 2, y + ch - 21)
 	end
 
-	--------------------------------------------------------------- status bar
-	srf:filledRectangle(0, sh - STATUS_H, sw, sh, C_BAR)
-	srf:hline(0, sw, sh - STATUS_H, C_BAR_EDGE)
-	text(srf, self.fontHint, C_HINT,
-	     self.editing and "turn: adjust   press: ok   back: cancel"
-	                   or "turn: select   press: edit   hold: bypass",
-	     PAD, sh - STATUS_H + 5)
-	textRight(srf, self.fontXS, C_LABEL, "b" .. BUILD, sw - PAD, sh - STATUS_H + 8)
+	-- NO STATUS BAR. The framework's iconbar (clock, battery, wifi) lives in the
+	-- last 24 rows and is what should be visible there. The hint line that used
+	-- to be here printed straight across the battery icon, and said nothing that
+	-- needed saying: turn to select and press to edit is how the whole device
+	-- works, and bypass now has a real menu item.
 end
 
 ------------------------------------------------------------------- editing
@@ -650,7 +709,14 @@ function _nudgeKey(self, key, delta)
 	]]
 	local before = s[key]
 	s[key] = v
-	if U.mustCheckAffordability(key, v, before) then
+	--[[
+	The affordability clamp exists ONLY because make-up comes out of the volume
+	control, and volume runs out at full scale. With level matching off nothing
+	is being paid for, so there is nothing to run out of -- refusing a boost
+	then would be a limit with no cause behind it, and it would trap the user at
+	a setting for a reason that no longer applies.
+	]]
+	if s.levelMatch and U.mustCheckAffordability(key, v, before) then
 		local budget = self:_headroomDb()
 		local _, _, i = D.designPair(FS,
 			{ kind = "lowshelf",  f0 = s.bassFreq, gainDb = s.bassGain, shape = s.bassQ },
@@ -740,19 +806,27 @@ function _redrawTone(self, srf)
 	-- beneath every window; painting our own copy is what broke the slide
 	-- transitions on the EQ screen. See the note in _redraw.
 
-	-- title bar
-	srf:filledRectangle(0, 0, sw, TITLE_H, C_BAR)
-	srf:filledRectangle(0, TITLE_H - 1, sw, TITLE_H, C_BAR_EDGE)
-	text(srf, self.fontTitle, C_HILITE, "Tone", PAD + 4, 6)
+	-- No title bar and no title of our own -- the window draws "Tone" already.
+	-- Only these right-aligned strings are ours, and they carry no background so
+	-- the framework's bar stays a single unbroken bar.
+	local stamp = "b" .. BUILD
+	textRight(srf, self.fontXS, C_DIM, stamp, sw - PAD, 12)
+	local readoutRight = sw - PAD - self.fontXS:width(stamp) - 8
 
-	-- Headroom readout, same figure the EQ screen shows, same corner. Two
-	-- screens editing one value must not disagree about what is affordable.
-	if self.limited then
-		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", sw - PAD, 8)
-	elseif self.attenDb and self.attenDb > 0.05 then
+	-- Bypass takes the corner when it is on. It has to be VISIBLE, not implied:
+	-- bypassed with a big boost still showing on the faders would otherwise look
+	-- like the filter is simply not working.
+	if not s.enabled then
+		textRight(srf, self.fontS, C_WARN, "BYPASS", readoutRight, 11)
+	elseif self.limited then
+		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", readoutRight, 11)
+	elseif s.levelMatch and self.attenDb and self.attenDb > 0.05 then
+		-- same figure the EQ screen shows, same corner, and gated the same way:
+		-- two screens editing one value must not disagree about what is
+		-- affordable, nor about whether affordability applies at all
 		textRight(srf, self.fontS, C_LABEL,
 		          string.format("-%.0f/%.0f", self.attenDb, self:_headroomDb()),
-		          sw - PAD, 8)
+		          readoutRight, 11)
 	end
 
 	for i, row in ipairs(TONE_ROWS) do
@@ -761,60 +835,102 @@ function _redrawTone(self, srf)
 		local editing  = selected and self.toneEditing
 		local db       = s[row.key] or 0
 
-		-- panel
+		-- The row panel itself does not change when editing.
 		if selected then
 			gradient(srf, 8, y, sw - 16, ROW_H, SEL_TOP, SEL_BOT, 0xEB)
+			srf:rectangle(8, y, sw - 8, y + ROW_H, C_CURVE)
 		else
-			srf:filledRectangle(8, y, sw - 8, y + ROW_H, C_PANEL)
+			srf:filledRectangle(8, y, sw - 8, y + ROW_H, C_ROW_OFF)
+			srf:rectangle(8, y, sw - 8, y + ROW_H, C_CELL_EDGE)
 		end
-		srf:rectangle(8, y, sw - 8, y + ROW_H,
-		              editing and C_CURVE or (selected and C_CURVE or C_CELL_EDGE))
 
-		text(srf, self.fontS, selected and C_TEXT or C_LABEL, row.lab, TRK_X, y + 8)
-		textRight(srf, self.fontVal,
-		          editing and C_CURVE or (selected and C_HILITE or C_TEXT),
+		-- Editing recolours the TEXT itself to the skin's teal. No panel, no box
+		-- behind it: the label and the value simply turn blue on the row's own
+		-- dark background, which is already high contrast.
+		local inkLab, inkVal
+		if editing then
+			inkLab, inkVal = C_CURVE, C_CURVE
+		else
+			inkLab = selected and C_TEXT or C_LABEL
+			inkVal = selected and C_HILITE or C_TEXT
+		end
+
+		text(srf, self.fontS, inkLab, row.lab, TRK_X, y + 8)
+		textRight(srf, self.fontVal, inkVal,
 		          string.format("%+.1f dB", db), sw - TRK_X, y + 6)
 
-		-- track
+		--[[
+		EDIT STATE: THE FADER BAR ONLY.
+
+		The bar fills with the skin's teal -- EDIT_TOP -> EDIT_BOT, the same
+		constants the EQ screen's editing cell uses -- so the thing the knob is
+		about to move is the thing that lights up.
+
+		⛔ Whatever is drawn ON the bar must invert with it. The centre-out fill
+		sits entirely inside the bar and is translucent teal normally; on a teal
+		bar it would vanish completely. The needle and the centre detent CROSS
+		the bar, dark panel above and below, so neither one colour works for the
+		whole length -- the needle gets a light halo with a dark core, which
+		reads on both.
+
+		The 5 dB ticks and the end labels are BELOW the bar, on the panel, and
+		are deliberately left light: they never touch the teal.
+		]]
 		local ty = y + 42
-		srf:filledRectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, C_PANEL)
-		srf:rectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, C_PANEL_EDGE)
+		local fillCol, axisCol, needleCol
+
+		if editing then
+			gradient(srf, TRK_X, ty, TRK_W, 8, EDIT_TOP, EDIT_BOT, 0xFF)
+			srf:rectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, 0xFFFFFFB0)
+			fillCol   = 0x00201FA8
+			axisCol   = 0x00201FE0
+			needleCol = C_EDIT_INK
+		else
+			srf:filledRectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, C_PANEL)
+			srf:rectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, C_PANEL_EDGE)
+			fillCol   = 0x3FD0C961
+			axisCol   = C_AXIS
+			needleCol = C_HILITE
+		end
 
 		-- Fill from the CENTRE to the needle, not from the left edge. At 0 dB it
 		-- has zero width and vanishes, which is the honest picture of "flat".
 		local nx = xForGain(db)
 		if nx > TRK_MID then
-			srf:filledRectangle(TRK_MID, ty, nx, ty + 8, 0x3FD0C961)
+			srf:filledRectangle(TRK_MID, ty, nx, ty + 8, fillCol)
 		elseif nx < TRK_MID then
-			srf:filledRectangle(nx, ty, TRK_MID, ty + 8, 0x3FD0C961)
+			srf:filledRectangle(nx, ty, TRK_MID, ty + 8, fillCol)
 		end
 
-		-- ticks every 5 dB, and a taller centre detent so flat can be FOUND
-		-- without reading the number
+		-- ticks every 5 dB, below the bar on the dark panel -- always light
 		for v = -15, 15, 5 do
 			local tx = xForGain(v)
 			local h  = (v == 0) and 5 or 3
 			srf:filledRectangle(tx, ty + 12, tx + 1, ty + 12 + h,
 			                    (v == 0) and C_AXIS or C_GRID)
 		end
-		srf:filledRectangle(TRK_MID, ty - 4, TRK_MID + 1, ty + 12, C_AXIS)
+		-- centre detent, inside the bar where it has to be found
+		srf:filledRectangle(TRK_MID, ty, TRK_MID + 1, ty + 8, axisCol)
 
-		-- the needle
-		local col = editing and C_CURVE or C_HILITE
-		srf:filledRectangle(nx - 1, ty - 6, nx + 2, ty + 14, col)
+		-- The needle crosses the bar. A light halo with a dark core reads
+		-- against the dark panel above and below AND against the teal between.
+		if editing then
+			srf:filledRectangle(nx - 2, ty - 6, nx + 3, ty + 14, C_HILITE)
+			srf:filledRectangle(nx - 1, ty - 6, nx + 2, ty + 14, needleCol)
+		else
+			srf:filledRectangle(nx - 1, ty - 6, nx + 2, ty + 14, needleCol)
+		end
 
-		text(srf, self.fontXS, C_LABEL, "-15", TRK_X, ty + 18)
-		textRight(srf, self.fontXS, C_LABEL, "+15", TRK_X + TRK_W, ty + 18)
+		-- ty + 15, not + 18. FreeSans 9 renders ~11 px tall, so a baseline at
+		-- ty + 18 put the glyph bottoms at y + 71 against a row that ends at
+		-- y + 70 -- the scale labels were running past the panel edge with no
+		-- margin at all. Gated by test/test_textfit.lua.
+		text(srf, self.fontXS, C_LABEL, "-15", TRK_X, ty + 15)
+		textRight(srf, self.fontXS, C_LABEL, "+15", TRK_X + TRK_W, ty + 15)
 	end
 
-	-- status bar
-	srf:filledRectangle(0, sh - STATUS_H, sw, sh, C_BAR)
-	srf:filledRectangle(0, sh - STATUS_H, sw, sh - STATUS_H + 1, C_BAR_EDGE)
-	text(srf, self.fontHint, C_HINT,
-	     self.toneEditing and "turn: adjust   press: done   back: cancel"
-	                       or "turn: select   press: edit",
-	     PAD + 4, sh - STATUS_H + 4)
-	textRight(srf, self.fontXS, C_DIM, "b" .. BUILD, sw - PAD, sh - STATUS_H + 8)
+	-- NO STATUS BAR: the framework's iconbar belongs in the last 24 rows, and
+	-- the hint line that used to cover it was redundant navigation instruction.
 end
 
 ------------------------------------------------------------------- window
@@ -822,10 +938,14 @@ end
 --[[
 THE TONE MENU -- the screen in front of the EQ.
 
-SKELETON. Only the Equalizer row is wired; the other four are placeholders for
-screens that do not exist yet, and they are deliberately inert. They carry NO
-callback rather than an empty one, so pressing them does nothing at all instead
-of playing a transition sound and going nowhere.
+Every row is wired. Level Match and Reset Tone
+are placeholders for screens that do not exist yet and are deliberately inert:
+they carry NO callback rather than an empty one, so pressing them does nothing at
+all instead of playing a transition sound and going nowhere.
+
+Level Match's checkbox is still a literal, and stays that way until it does
+something. A box that shows a real state but ignores the press is worse than one
+that is plainly disconnected.
 
 Built from the stock widgets the device's own settings screens use --
 SimpleMenu + Checkbox with style 'item_choice' -- rather than the Canvas the EQ
@@ -838,17 +958,39 @@ function menuShow(self, menuItem)
 	                      'settingstitle')
 	local menu   = SimpleMenu("menu")
 
-	-- 1. Tone Control -- will become the bypass toggle.
-	--
-	-- NOT WIRED, and the initial state is a literal rather than a read of
-	-- settings.enabled on purpose. A checkbox that displays the real state but
-	-- does nothing when toggled is worse than one that is plainly disconnected:
-	-- it would show "on", accept the press, and silently not bypass.
+	-- The toggle below writes coefficients, so the mixer and a designed pair
+	-- have to exist first. NOT fail-closed here, unlike the two editors: this
+	-- menu is still useful without baby_bsp (the Equalizer row does its own
+	-- check on entry), and a one-off bypass toggle can afford the ~1 s shell
+	-- fallback. A knob path cannot, which is why those screens refuse.
+	local okbsp, bsp = pcall(require, "baby_bsp")
+	self.bsp = okbsp and bsp or nil
+	self:_design()
+
+	--[[
+	1. Tone Control -- THE bypass toggle.
+
+	Reads and writes settings.enabled, which is the applet's ONLY bypass state.
+	The EQ screen's hold-to-bypass and the Tone screen's toggle that same field,
+	so the three cannot drift apart: there is one flag, not three copies to keep
+	in step. _applyNow reads it directly.
+
+	The box is constructed from the LIVE value every time the menu opens, so
+	arriving here after a hold-to-bypass on either editor shows the truth rather
+	than a remembered default.
+	]]
 	menu:addItem({
 		text   = self:string("SBRADIOEQ_TONE_CONTROL"),
 		style  = 'item_choice',
 		weight = 1,
-		check  = Checkbox("checkbox", function(_, _) end, true),
+		check  = Checkbox("checkbox",
+			function(_, isSelected)
+				local s = self:getSettings()
+				s.enabled = isSelected and true or false
+				self:_flushApply()
+				self:storeSettings()
+			end,
+			self:getSettings().enabled and true or false),
 	})
 
 	-- 2. Tone -- two centre-zero faders over the SAME bassGain/trebGain the
@@ -870,26 +1012,199 @@ function menuShow(self, menuItem)
 			   end,
 	})
 
-	-- 4. Loudness -- not built.
+	--[[
+	NO LOUDNESS ROW, and this is a decision rather than an omission.
+
+	Loudness would have to fold into the two shelves the user already controls,
+	because the chip has exactly two biquads and both are spent. MEASURED: a
+	naive gain fold is BIT-IDENTICAL to the user turning the bass knob up -- an
+	assert in the comparison confirmed it, not an argument. Pulling the shelf
+	corner toward 120 Hz is the only part they could not reproduce by hand, and
+	that is worth at most 1.02 dB, in a narrow band around 150 Hz, against a
+	chip whose own coefficient error is already ~1.13 dB.
+
+	So the measurable difference between "loudness on" and "you turned the knob
+	up" sits below our own error floor.
+
+	What would change this is AUTOMATIC level tracking -- the one thing the
+	knobs genuinely cannot do. That is blocked on the framework emitting no
+	volume notification at all (checked: the complete notify_ list has nothing
+	for volume), so it would mean polling plus coefficient rewrites during
+	playback, which is the exact operation that produced this project's popping
+	and its shriek.
+
+	Reinstating it needs that problem solved first, not a better curve.
+	]]
+
+	-- 4. Level Matching -- its own screen, because the tick box needs a sentence
+	-- of explanation before it means anything.
 	menu:addItem({
-		text   = self:string("SBRADIOEQ_LOUDNESS"),
-		weight = 4,
+		text     = self:string("SBRADIOEQ_LEVEL_MATCHING"),
+		sound    = "WINDOWSHOW",
+		weight   = 4,
+		callback = function(event, item) self:levelMatchShow(item) end,
 	})
 
-	-- 5. Level Match -- will toggle the make-up gain that compensates for the
-	-- chip's cut-only filter. NOT WIRED; same reasoning as Tone Control above,
-	-- the state is a literal rather than a read of anything real.
+	-- 6. Reset Tone -- confirm screen, then back to the installed defaults.
 	menu:addItem({
-		text   = self:string("SBRADIOEQ_LEVEL_MATCH"),
-		style  = 'item_choice',
-		weight = 5,
-		check  = Checkbox("checkbox", function(_, _) end, true),
+		text     = self:string("SBRADIOEQ_RESET"),
+		sound    = "WINDOWSHOW",
+		weight   = 5,
+		callback = function(event, item) self:resetShow(item) end,
 	})
 
-	-- 6. Reset Tone -- leads to a confirm screen. Not built.
+	window:addWidget(menu)
+	self:tieAndShowWindow(window)
+	return window
+end
+
+
+--[[
+LEVEL MATCHING -- a description, then the tick box under it.
+
+Built the way SetupAppletInstaller presents its warning: the explanatory text is
+the MENU'S HEADER WIDGET (menu:setHeaderWidget), not a separate widget added to
+the window. That matters -- a Textarea added alongside a SimpleMenu competes
+with it for the window's space and the menu ends up scrolling under it. As a
+header it is part of the menu's own layout.
+
+⛔ IT MUST FIT ONE SCREEN. The content band between the framework's title bar and
+its iconbar is 180 px. The tick box row is 45 px (the skin's
+LANDSCAPE_LINE_ITEM_HEIGHT), leaving 135 px, and help_text costs 10 px of top
+padding and 8 of bottom, so the text itself gets 117 px. At the skin's
+lineHeight of 20 that is FIVE lines. The string wraps to four.
+
+Those numbers are the skin's own, read from QVGAbaseSkin, and the wrap was
+measured with the real face at the real width. Gated by test/test_textfit.lua,
+which re-measures the shipped string rather than trusting this comment.
+
+THE COPY IS LOAD-BEARING, so it is worth saying what it must not get wrong.
+Level matching moves the volume in BOTH directions -- dropping a boost lowers it
+again, and Reset lowers it by the whole make-up at once -- and it happens LIVE,
+on every detent, not when the screen is saved. A first draft said "raises the
+volume" and omitted the timing; both were wrong, and a description that is wrong
+about which way the volume moves is worse than no description.
+
+WIRED, to settings.levelMatch. That flag gates SIX places, and the reason to
+list them is that missing one leaves a feature half-off rather than off:
+
+  1. _levelMatch          the volume move itself -- forced to target 0 when off,
+                          so switching off UNWINDS existing make-up
+  2. _nudgeKey            the affordability clamp, which exists only because
+                          make-up is paid for out of the volume control
+  3. _redraw              the EQ screen's "-14/82" readout
+  4. _redrawTone          the Tone screen's copy of the same readout
+  5. settingsShow's Back  the cancel-restores-volume path
+  6. toneShow's Back      the same path on the other screen
+
+The default is ON. Off is a deliberate choice, not the starting point: without
+matching, turning the bass up makes the music quieter, which is exactly what the
+control looked broken doing before level matching existed.
+]]
+function levelMatchShow(self, menuItem)
+	local window = Window("text_list", menuItem and menuItem.text or "Level Matching",
+	                      'settingstitle')
+	local menu   = SimpleMenu("menu")
+
+	menu:setHeaderWidget(Textarea("help_text",
+	                              self:string("SBRADIOEQ_LEVEL_MATCH_DESC")))
+
+	--[[
+	Toggling APPLIES IMMEDIATELY, and that is the point of routing it through
+	_applyNow rather than just storing the flag.
+
+	OFF: _levelMatch forces its target to 0, so the make-up already folded into
+	     the volume is unwound on the spot -- the volume comes DOWN. Leaving it
+	     for "next time something applies" would strand the user loud.
+	ON:  the curve's make-up is applied, so the volume comes back UP to where
+	     matching says it belongs. That is a raise, but it is the one the user
+	     just asked for by ticking the box.
+	]]
 	menu:addItem({
-		text   = self:string("SBRADIOEQ_RESET"),
-		weight = 6,
+		text  = self:string("SBRADIOEQ_LEVEL_MATCH"),
+		style = 'item_choice',
+		check = Checkbox("checkbox",
+			function(_, isSelected)
+				local s = self:getSettings()
+				s.levelMatch = isSelected and true or false
+				if not self.bsp then
+					local okbsp, bsp = pcall(require, "baby_bsp")
+					self.bsp = okbsp and bsp or nil
+				end
+				self:_design()
+				self:_applyNow()
+				self:storeSettings()
+			end,
+			self:getSettings().levelMatch ~= false),
+	})
+
+	window:addWidget(menu)
+	self:tieAndShowWindow(window)
+	return window
+end
+
+--[[
+RESET -- back to the installed defaults, curve AND volume.
+
+⛔ appliedAtten IS DELIBERATELY NOT RESET HERE, and getting this wrong is a
+loud-audio bug, not a cosmetic one.
+
+appliedAtten is bookkeeping about the PLAYER VOLUME: it records how much make-up
+gain is currently folded into it. At the moment Reset runs, the volume is still
+carrying the old boost's make-up -- up to 15 dB of it.
+
+Copy appliedAtten = 0 in with the rest and _levelMatch computes
+delta = target(0) - applied(0) = 0, decides there is nothing to do, and leaves
+the volume 15 dB up over a curve that is now FLAT. That is the same shape as the
+bypass bug: the compensation outlives the thing it was compensating for.
+
+Leaving it alone makes _levelMatch compute delta = 0 - 15 = -15 and take the
+volume back DOWN, then record the achieved figure. The direction is always
+quieter, which is the safe way to be wrong.
+]]
+function resetToDefaults(self)
+	if not self.bsp then
+		local okbsp, bsp = pcall(require, "baby_bsp")
+		self.bsp = okbsp and bsp or nil
+	end
+
+	local s = self:getSettings()
+	for k, v in pairs(U.defaults()) do
+		if k ~= "appliedAtten" then s[k] = v end
+	end
+
+	self:_design()
+	self:_applyNow()          -- brings the volume back down; see above
+	self:storeSettings()
+	log:info("SBEQ-RESET to defaults, build=", BUILD)
+end
+
+--[[
+The confirm screen, modelled on the device's own SetupFactoryReset: a plain
+text_list window whose whole body is a two-item SimpleMenu, Cancel first.
+
+Cancel first is the model's ordering and it is the right one for a destructive
+action -- the highlight lands on the harmless option, so a stray press does
+nothing.
+]]
+function resetShow(self, menuItem)
+	local window = Window("text_list", menuItem and menuItem.text or "Reset Tone",
+	                      'settingstitle')
+
+	local menu = SimpleMenu("menu", {
+		{
+			text     = self:string("SBRADIOEQ_RESET_CANCEL"),
+			sound    = "WINDOWHIDE",
+			callback = function() window:hide() end,
+		},
+		{
+			text     = self:string("SBRADIOEQ_RESET_CONTINUE"),
+			sound    = "WINDOWSHOW",
+			callback = function()
+				self:resetToDefaults()
+				window:hide()
+			end,
+		},
 	})
 
 	window:addWidget(menu)
@@ -906,8 +1221,6 @@ function toneShow(self, menuItem)
 	self.toneEditing = false
 	self.fontS     = Font:load("fonts/FreeSans.ttf", 12)
 	self.fontXS    = Font:load("fonts/FreeSans.ttf", 9)
-	self.fontHint  = Font:load("fonts/FreeSans.ttf", 13)
-	self.fontTitle = Font:load("fonts/FreeSansBold.ttf", 14)
 	self.fontVal   = Font:load("fonts/FreeSansBold.ttf", 15)
 
 	-- Fail closed exactly as the EQ screen does: this screen writes coefficients
@@ -1004,7 +1317,12 @@ function toneShow(self, menuItem)
 			local cur        = player and player:getVolume()
 			local appliedNow = s.appliedAtten or 0
 			U.restoreSnapshot(s, self.snap)
-			if player and cur then
+			-- Gated even though it is self-neutralising: with level matching off
+			-- appliedAtten stays 0 through the whole edit, so cancelVolumeDb's
+			-- (appliedNow - appliedAtSnapshot) is 0 and the volume would not
+			-- move anyway. Relying on a value happening to be zero is how a
+			-- residue bug starts; say what is meant instead.
+			if s.levelMatch and player and cur then
 				local wantDb = U.cancelVolumeDb(D.volumeToDb(cur), appliedNow,
 				                                s.appliedAtten or 0)
 				local newVol = D.dbToVolume(wantDb)
@@ -1014,6 +1332,26 @@ function toneShow(self, menuItem)
 			self.toneEditing = false
 			self:_design()
 			self:_applyNow()
+			self:storeSettings()
+			repaint()
+			return EVENT_CONSUME
+		end
+		return EVENT_UNUSED
+	end)
+
+	--[[
+	HOLD TO BYPASS -- the same gesture, on the same one flag.
+
+	settings.enabled is the ONLY bypass state in the applet. The EQ screen's
+	hold, this hold, and the Tone Controls checkbox all toggle this one field,
+	so there is nothing to keep in sync: they cannot disagree because there is
+	only one of them. _applyNow reads it directly (`(not s.enabled) or ...`).
+	]]
+	window:addListener(EVENT_KEY_HOLD, function(event)
+		if event:getKeycode() == KEY_GO then
+			local s = self:getSettings()
+			s.enabled = not s.enabled
+			self:_flushApply()
 			self:storeSettings()
 			repaint()
 			return EVENT_CONSUME
@@ -1034,8 +1372,6 @@ function settingsShow(self, menuItem)
 	self.editing = false
 	self.fontS     = Font:load("fonts/FreeSans.ttf", 12)
 	self.fontXS    = Font:load("fonts/FreeSans.ttf", 9)
-	self.fontHint  = Font:load("fonts/FreeSans.ttf", 13)
-	self.fontTitle = Font:load("fonts/FreeSansBold.ttf", 14)
 	self.fontVal   = Font:load("fonts/FreeSansBold.ttf", 15)
 
 	-- No wallpaper is loaded here any more: the framework draws the background
@@ -1230,7 +1566,12 @@ function settingsShow(self, menuItem)
 
 			U.restoreSnapshot(s, self.snap)
 
-			if player and cur then
+			-- Gated even though it is self-neutralising: with level matching off
+			-- appliedAtten stays 0 through the whole edit, so cancelVolumeDb's
+			-- (appliedNow - appliedAtSnapshot) is 0 and the volume would not
+			-- move anyway. Relying on a value happening to be zero is how a
+			-- residue bug starts; say what is meant instead.
+			if s.levelMatch and player and cur then
 				local wantDb = U.cancelVolumeDb(D.volumeToDb(cur), appliedNow,
 				                                s.appliedAtten or 0)
 				local newVol = D.dbToVolume(wantDb)

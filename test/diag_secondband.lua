@@ -22,11 +22,11 @@ local function state(bg, tg, vol)
 	local volDb = D.volumeToDb(vol)
 	return function(f)
 		local d = volDb
-		if i.ideal1 then
-			d = d + D.responseDb(i.ideal1.b0, i.ideal1.b1, i.ideal1.b2, i.ideal1.a1, i.ideal1.a2, f, FS)
+		if i.realised1 then
+			d = d + D.responseDb(i.realised1.b0, i.realised1.b1, i.realised1.b2, i.realised1.a1, i.realised1.a2, f, FS)
 		end
-		if i.ideal2 then
-			d = d + D.responseDb(i.ideal2.b0, i.ideal2.b1, i.ideal2.b2, i.ideal2.a1, i.ideal2.a2, f, FS)
+		if i.realised2 then
+			d = d + D.responseDb(i.realised2.b0, i.realised2.b1, i.realised2.b2, i.realised2.a1, i.realised2.a2, f, FS)
 		end
 		return d
 	end, i.attenDb, volDb

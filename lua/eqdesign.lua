@@ -316,7 +316,7 @@ function M.design(kind, fs, f0, gainDb, shape, opts)
 		than what the chip does (measured gap up to 7.33 dB at 40 Hz for a
 		100 Hz / +15 dB / S 2.0 bass shelf), which is the exact defect
 		test_graphtruth.lua now forbids. designPair() hands the applet realised
-		sections to draw (info.ideal1/ideal2 there), and fit-quantisation below
+		sections to draw (info.realised1/realised2 there), and fit-quantisation below
 		keeps those close to the request.
 		]]
 		local info = { ok = (reason == nil), shape = try, maxErrDb = maxErr,
@@ -599,7 +599,7 @@ Two constraints, not one:
 That yields the minimum total attenuation that satisfies both. Verified against
 the independent case (one band flat), where it agrees with the old behaviour.
 
-Returns c1, c2, info { attenDb, ok, ideal1, ideal2, diag }. ideal1/ideal2 are
+Returns c1, c2, info { attenDb, ok, realised1, realised2, diag }. realised1/realised2 are
 the REALISED sections (dequantized q1/q2) -- the curve to draw. See the note at
 the return statement.
 ]]
@@ -889,7 +889,7 @@ function M.designPair(fs, b1, b2)
 	if atten < 0.25 and atten > 0 then atten = 0 end
 
 	--[[
-	THE DRAWN CURVE IS THE REALISED FILTER. ideal1/ideal2 are float views of the
+	THE DRAWN CURVE IS THE REALISED FILTER. realised1/realised2 are float views of the
 	integers that go to the codec -- dequantized q1/q2 -- so anything plotted from
 	them is, by construction, what the chip does (test_graphtruth.lua is the
 	specification). They are NOT the unquantised request: at low bass corners no
@@ -907,7 +907,7 @@ function M.designPair(fs, b1, b2)
 
 	return q1, q2,
 	       { attenDb = atten, k1 = k1, k2 = k2,
-	         ideal1 = view(q1), ideal2 = view(q2), ok = true,
+	         realised1 = view(q1), realised2 = view(q2), ok = true,
 	         diag = diag }
 end
 

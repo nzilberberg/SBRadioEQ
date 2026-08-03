@@ -10,6 +10,10 @@ local oo            = require("loop.simple")
 local AppletMeta    = require("jive.AppletMeta")
 local System        = require("jive.System")
 
+-- The defaults live in uistate so that a fresh install and "Reset Tone" cannot
+-- disagree: there is one table, not two copies that drift.
+local U             = require("applets.SBRadioEQ.uistate")
+
 local appletManager = appletManager
 local jiveMain      = jiveMain
 
@@ -22,20 +26,12 @@ function jiveVersion(meta)
 end
 
 
+-- ⛔ Do NOT restate the values here. They are uistate.M.DEFAULTS, which is also
+-- what "Reset Tone" restores; a second copy in this file would agree the day it
+-- was written and drift the day either was tuned. Gated by
+-- tools/check-defaults-single-source.sh.
 function defaultSettings(meta)
-	return {
-		enabled   = true,
-		bassGain  = 0,     -- dB, -15..+15
-		bassFreq  = 150,   -- Hz
-		bassQ     = 0.9,
-		trebGain  = 0,
-		trebFreq  = 4000,
-		trebQ     = 0.9,
-		-- How much make-up gain is currently folded into the player volume.
-		-- Persisted so a re-apply at boot computes a zero delta and does not
-		-- jump the volume on every startup.
-		appliedAtten = 0,
-	}
+	return U.defaults()
 end
 
 

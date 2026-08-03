@@ -3,7 +3,10 @@ cd /tmp && jive diag_graphtruth
 
 "I can set bass 100 Hz / +15 dB / Q 2.0. Is the graph telling lies?"
 
-Answerable exactly. The applet draws self.ideal1/ideal2 -- the UNQUANTISED design
+Answerable exactly. The applet draws self.realised1/realised2 -- float views of the
+QUANTISED sections, i.e. what the chip actually runs. (This line used to say
+"the UNQUANTISED design"; that was true once and became false when fit-
+quantisation landed, and a stale comment is worse than none.)
 -- offset by attenDb. The chip runs the quantised coefficients. So the question
 is simply how far apart those two curves are at that setting.
 
@@ -21,7 +24,7 @@ local function compare(bf, bg, bq, label)
 		{ kind = "lowshelf",  f0 = bf, gainDb = bg, shape = bq },
 		{ kind = "highshelf", f0 = 4000, gainDb = 0, shape = 0.9 })
 	local atten = i.attenDb or 0
-	local id = i.ideal1
+	local id = i.realised1
 
 	print(string.format("=== %s : bass %d Hz / %+d dB / Q %.1f   (make-up %.2f dB)",
 		label, bf, bg, bq, atten))
@@ -61,7 +64,7 @@ for _, bq in ipairs({ 0.2, 0.9, 1.5, 2.0 }) do
 	local c1, _, i = D.designPair(FS,
 		{ kind = "lowshelf",  f0 = bf, gainDb = bg, shape = bq },
 		{ kind = "highshelf", f0 = 4000, gainDb = 0, shape = 0.9 })
-	local id = i.ideal1
+	local id = i.realised1
 	local b0, b1, b2, a1, a2 = D.dequantize(c1)
 	for _, f in ipairs({ 40, 50, 60, 80, 100, 150, 200, 400, 1000 }) do
 		local g = id and D.responseDb(id.b0, id.b1, id.b2, id.a1, id.a2, f, FS) or 0
