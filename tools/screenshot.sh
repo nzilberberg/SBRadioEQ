@@ -78,11 +78,34 @@ for c in "$@"; do
 	esac
 done
 
+SETTINGS=/etc/squeezeplay/userpath/settings/SBRadioEQ.lua
+
+# ---- snapshot the settings BEFORE driving ---------------------------------
+# Automatic, not a step anyone has to remember. The one time this was left to
+# judgement, a stray scroll moved a saved bassGain by 2.5 dB and it was caught
+# only because an unrelated backup happened to exist.
+if [ -n "$seq" ]; then
+	$SCP "$RADIO:$SETTINGS" "$OUT/settings.before.lua" >/dev/null 2>&1 || true
+fi
+
 # sleep 2 is the transition settle, not padding.
 $SSH "$RADIO" "chmod +x /tmp/inject.sh; $seq sleep 2; dd if=/dev/fb0 of=/tmp/fb.raw bs=1024 count=300 2>/dev/null"
 $SCP "$RADIO:/tmp/fb.raw" "$OUT/screen.raw" >/dev/null
 
 echo "captured $OUT/screen.raw ($(wc -c < "$OUT/screen.raw") bytes)"
+
+# ---- and prove driving did not change them --------------------------------
+# Runs BEFORE the PNG is written, so a mutation cannot be buried under a
+# cheerful "wrote screen.png". The exit code is deliberately propagated: a
+# driving run that edited the user's tuning is a failed run.
+DIRTY=0
+if [ -n "$seq" ] && [ -f "$OUT/settings.before.lua" ]; then
+	$SCP "$RADIO:$SETTINGS" "$OUT/settings.after.lua" >/dev/null 2>&1 || true
+	echo ""
+	sh "$HERE/tools/check-settings-unchanged.sh" \
+		"$OUT/settings.before.lua" "$OUT/settings.after.lua" || DIRTY=$?
+	echo ""
+fi
 
 if command -v powershell.exe >/dev/null 2>&1; then
 	powershell.exe -NoProfile -ExecutionPolicy Bypass \
@@ -93,3 +116,5 @@ if command -v powershell.exe >/dev/null 2>&1; then
 else
 	echo "(no powershell.exe -- raw only; decode RGB565 240x320, rotate 90 CW)"
 fi
+
+exit $DIRTY
