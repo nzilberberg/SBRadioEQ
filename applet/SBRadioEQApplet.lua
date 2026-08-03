@@ -91,7 +91,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 20
+local BUILD = 21
 
 local C_BAR       = 0x000000C4     -- title / status strips
 local C_BAR_EDGE  = 0xFFFFFF26
@@ -610,9 +610,20 @@ end
 
 ------------------------------------------------------------------- editing
 
+-- _nudge edits the cell the EQ screen has selected; _nudgeKey edits a NAMED
+-- setting, which is what the Tone screen needs -- it has no cell grid, just bass
+-- and treble gain.
+--
+-- Deliberately one implementation. The affordability rule below is the whole
+-- reason a boost can be refused, and a second copy of it on the Tone screen
+-- would be a copy that drifts: the two screens edit the SAME bassGain and
+-- trebGain, so they must refuse the same steps for the same reasons.
 function _nudge(self, delta)
+	return self:_nudgeKey(CELLS[self.cell].key, delta)
+end
+
+function _nudgeKey(self, key, delta)
 	local s   = self:getSettings()
-	local key = CELLS[self.cell].key
 	local v   = U.stepValue(key, s[key], delta)
 
 	--[[
@@ -668,6 +679,144 @@ function _headroomDb(self)
 	return (s.appliedAtten or 0) - D.volumeToDb(cur)
 end
 
+------------------------------------------------------------- tone faders
+
+--[[
+THE TONE SCREEN -- "easy mode" for the same two numbers the EQ screen edits.
+
+It edits bassGain and trebGain DIRECTLY, in the same settings table, through the
+same _nudgeKey / _design / _applyNow path. It is not a second filter and not a
+second set of values: frequency and Q are left exactly as they are, so whatever
+the EQ screen was showing still holds when you come back to it.
+
+That is the whole point of the screen. Someone who wants "more bass" gets one
+fader and a number, and never has to meet a shelf frequency or a Q. Someone who
+does can open the Equalizer and find their change already there.
+
+WHY A CUSTOM WIDGET. The Radio's stock Slider is a pill that fills from the
+left, which is right for brightness -- 0 is the floor and more is further along.
+Gain is signed: 0 is the MIDDLE, and -15 is as far from flat as +15. A
+left-filling bar at -15 dB would be drawn empty, and empty reads as "off"
+rather than "cut". So the track is centre-zero with a needle, drawn here.
+
+The +15 end of the fader is a CONTROL range, not a promise. The chip cannot
+express gain above 0 dB, so a boost is realised as cut-elsewhere plus make-up
+volume, and the make-up runs out -- see _nudgeKey. Because this screen goes
+through the same clamp, a step that cannot be paid for is refused here exactly
+as it is on the EQ screen, and self.limited says so on screen.
+]]
+
+local TONE_ROWS = {
+	{ key = "bassGain", lab = "BASS"   },
+	{ key = "trebGain", lab = "TREBLE" },
+}
+
+-- Geometry, in the 320x240 the device actually has. Centre-zero: the track runs
+-- TRK_X..TRK_X+TRK_W and 0 dB sits exactly at its midpoint.
+local TRK_X, TRK_W = 20, 280
+local TRK_MID      = TRK_X + TRK_W / 2
+local ROW_H        = 70
+local ROW1_Y       = 42
+local ROW_GAP      = 14
+local GAIN_MAX     = 15
+
+local function toneRowY(i)
+	return ROW1_Y + (i - 1) * (ROW_H + ROW_GAP)
+end
+
+-- dB -> pixel. Clamped, so a value outside the range cannot draw the needle
+-- outside the track and quietly imply a position the control cannot reach.
+local function xForGain(db)
+	if db >  GAIN_MAX then db =  GAIN_MAX end
+	if db < -GAIN_MAX then db = -GAIN_MAX end
+	return TRK_MID + (db / GAIN_MAX) * (TRK_W / 2)
+end
+
+function _redrawTone(self, srf)
+	local sw, sh = srf:getSize()
+	local s = self:getSettings()
+
+	-- ⛔ The wallpaper is NOT painted here. Framework:setBackground draws it
+	-- beneath every window; painting our own copy is what broke the slide
+	-- transitions on the EQ screen. See the note in _redraw.
+
+	-- title bar
+	srf:filledRectangle(0, 0, sw, TITLE_H, C_BAR)
+	srf:filledRectangle(0, TITLE_H - 1, sw, TITLE_H, C_BAR_EDGE)
+	text(srf, self.fontTitle, C_HILITE, "Tone", PAD + 4, 6)
+
+	-- Headroom readout, same figure the EQ screen shows, same corner. Two
+	-- screens editing one value must not disagree about what is affordable.
+	if self.limited then
+		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", sw - PAD, 8)
+	elseif self.attenDb and self.attenDb > 0.05 then
+		textRight(srf, self.fontS, C_LABEL,
+		          string.format("-%.0f/%.0f", self.attenDb, self:_headroomDb()),
+		          sw - PAD, 8)
+	end
+
+	for i, row in ipairs(TONE_ROWS) do
+		local y        = toneRowY(i)
+		local selected = (self.toneRow == i)
+		local editing  = selected and self.toneEditing
+		local db       = s[row.key] or 0
+
+		-- panel
+		if selected then
+			gradient(srf, 8, y, sw - 16, ROW_H, SEL_TOP, SEL_BOT, 0xEB)
+		else
+			srf:filledRectangle(8, y, sw - 8, y + ROW_H, C_PANEL)
+		end
+		srf:rectangle(8, y, sw - 8, y + ROW_H,
+		              editing and C_CURVE or (selected and C_CURVE or C_CELL_EDGE))
+
+		text(srf, self.fontS, selected and C_TEXT or C_LABEL, row.lab, TRK_X, y + 8)
+		textRight(srf, self.fontVal,
+		          editing and C_CURVE or (selected and C_HILITE or C_TEXT),
+		          string.format("%+.1f dB", db), sw - TRK_X, y + 6)
+
+		-- track
+		local ty = y + 42
+		srf:filledRectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, C_PANEL)
+		srf:rectangle(TRK_X, ty, TRK_X + TRK_W, ty + 8, C_PANEL_EDGE)
+
+		-- Fill from the CENTRE to the needle, not from the left edge. At 0 dB it
+		-- has zero width and vanishes, which is the honest picture of "flat".
+		local nx = xForGain(db)
+		if nx > TRK_MID then
+			srf:filledRectangle(TRK_MID, ty, nx, ty + 8, 0x3FD0C961)
+		elseif nx < TRK_MID then
+			srf:filledRectangle(nx, ty, TRK_MID, ty + 8, 0x3FD0C961)
+		end
+
+		-- ticks every 5 dB, and a taller centre detent so flat can be FOUND
+		-- without reading the number
+		for v = -15, 15, 5 do
+			local tx = xForGain(v)
+			local h  = (v == 0) and 5 or 3
+			srf:filledRectangle(tx, ty + 12, tx + 1, ty + 12 + h,
+			                    (v == 0) and C_AXIS or C_GRID)
+		end
+		srf:filledRectangle(TRK_MID, ty - 4, TRK_MID + 1, ty + 12, C_AXIS)
+
+		-- the needle
+		local col = editing and C_CURVE or C_HILITE
+		srf:filledRectangle(nx - 1, ty - 6, nx + 2, ty + 14, col)
+
+		text(srf, self.fontXS, C_LABEL, "-15", TRK_X, ty + 18)
+		textRight(srf, self.fontXS, C_LABEL, "+15", TRK_X + TRK_W, ty + 18)
+	end
+
+	-- status bar
+	srf:filledRectangle(0, sh - STATUS_H, sw, sh, C_BAR)
+	srf:filledRectangle(0, sh - STATUS_H, sw, sh - STATUS_H + 1, C_BAR_EDGE)
+	text(srf, self.fontHint, C_HINT,
+	     self.toneEditing and "turn: adjust   press: done   back: cancel"
+	                       or "turn: select   press: edit",
+	     PAD + 4, sh - STATUS_H + 4)
+	textRight(srf, self.fontXS, C_DIM, "b" .. BUILD, sw - PAD, sh - STATUS_H + 8)
+end
+
 ------------------------------------------------------------------- window
 
 --[[
@@ -702,10 +851,13 @@ function menuShow(self, menuItem)
 		check  = Checkbox("checkbox", function(_, _) end, true),
 	})
 
-	-- 2. Tone -- bass/treble sliders. Not built.
+	-- 2. Tone -- two centre-zero faders over the SAME bassGain/trebGain the
+	-- Equalizer edits. Live.
 	menu:addItem({
-		text   = self:string("SBRADIOEQ_TONE"),
-		weight = 2,
+		text     = self:string("SBRADIOEQ_TONE"),
+		sound    = "WINDOWSHOW",
+		weight   = 2,
+		callback = function(event, item) self:toneShow(item) end,
 	})
 
 	-- 3. Equalizer -- the one live row.
@@ -741,6 +893,134 @@ function menuShow(self, menuItem)
 	})
 
 	window:addWidget(menu)
+	self:tieAndShowWindow(window)
+	return window
+end
+
+
+function toneShow(self, menuItem)
+	local window = Window("text_list", menuItem and menuItem.text or "Tone",
+	                      'settingstitle')
+
+	self.toneRow     = 1
+	self.toneEditing = false
+	self.fontS     = Font:load("fonts/FreeSans.ttf", 12)
+	self.fontXS    = Font:load("fonts/FreeSans.ttf", 9)
+	self.fontHint  = Font:load("fonts/FreeSans.ttf", 13)
+	self.fontTitle = Font:load("fonts/FreeSansBold.ttf", 14)
+	self.fontVal   = Font:load("fonts/FreeSansBold.ttf", 15)
+
+	-- Fail closed exactly as the EQ screen does: this screen writes coefficients
+	-- on every detent through the same path, so the amixer fallback would stall
+	-- the UI for about a second per click here too.
+	local okbsp, bsp = pcall(require, "baby_bsp")
+	self.bsp = okbsp and bsp or nil
+	if not self.bsp then
+		log:warn("SBRadioEQ: baby_bsp unavailable -- refusing to open Tone")
+		local Textarea = require("jive.ui.Textarea")
+		local w = Window("text_list", menuItem and menuItem.text or "Tone",
+		                 'settingstitle')
+		w:addWidget(Textarea("text",
+			"Tone controls unavailable on this firmware.\n\n" ..
+			"The in-process mixer module (baby_bsp) is missing.\n\n" ..
+			"Any tone setting already saved is still applied at startup."))
+		self:tieAndShowWindow(w)
+		return w
+	end
+
+	-- Prime the mute-restore level once, on entry -- never on the knob path.
+	-- It costs a ~220 ms process spawn; paid per click it was the popping.
+	A.forgetMutePoint()
+	A.mutePoint()
+
+	self:_design()
+
+	self.canvas = Canvas('debug_canvas', function(srf) self:_redrawTone(srf) end)
+
+	--[[
+	⛔ Canvas:draw DROPS THE LAYER ARGUMENT, so it paints in every pass, and a
+	window transition draws each layer at its own offset. Without this override
+	the incoming window paints unoffset over the animation and the screen CUTS
+	instead of sliding. This is the same fault that broke the EQ screen; it is
+	a property of jive/ui/Canvas.lua, so EVERY Canvas screen must repeat it.
+	Gated by test/test_canvaslayer.lua.
+	]]
+	local applet = self
+	self.canvas.draw = function(_, surface, layer)
+		if layer and (layer & LAYER_CONTENT) == 0 then return end
+		applet:_redrawTone(surface)
+	end
+
+	window:addWidget(self.canvas)
+
+	-- ScreenSaversApplet eats EVENT_SCROLL globally to wake from idle, which
+	-- left the knob dead on the EQ screen until an unrelated press. Same fix.
+	window:setAllowScreensaver(false)
+
+	local function repaint()
+		self.canvas:reDraw()
+		Framework:reDraw(nil)
+	end
+
+	window:addListener(EVENT_SCROLL, function(event)
+		local d = event:getScroll()
+		if self.toneEditing then
+			self:_nudgeKey(TONE_ROWS[self.toneRow].key, d)
+			self:_design()
+			self:_applyNow()
+		else
+			-- one row per event, so a fast twist cannot jump the selection
+			self.toneRow = U.nextCell(self.toneRow, d, #TONE_ROWS)
+		end
+		repaint()
+		return EVENT_CONSUME
+	end)
+
+	window:addListener(EVENT_KEY_PRESS, function(event)
+		local k = event:getKeycode()
+		if k == KEY_GO then
+			if not self.toneEditing then
+				-- Snapshot BEFORE the first click: edits apply live, so cancel
+				-- means "put it back", and there is nothing to put back unless
+				-- it was captured on entry to EDIT.
+				self.snap        = U.snapshot(self:getSettings())
+				self.toneEditing = true
+			else
+				self.toneEditing = false
+				self.snap        = nil
+				self:_flushApply()
+				self:storeSettings()
+			end
+			repaint()
+			return EVENT_CONSUME
+
+		elseif k == KEY_BACK and self.toneEditing then
+			-- BACK cancels the edit and must restore the VOLUME too, not just
+			-- the gain: level matching moved the player volume while editing,
+			-- so restoring the number alone leaves the make-up asserting an
+			-- attenuation that is no longer there.
+			local s          = self:getSettings()
+			local player     = Player:getLocalPlayer()
+			local cur        = player and player:getVolume()
+			local appliedNow = s.appliedAtten or 0
+			U.restoreSnapshot(s, self.snap)
+			if player and cur then
+				local wantDb = U.cancelVolumeDb(D.volumeToDb(cur), appliedNow,
+				                                s.appliedAtten or 0)
+				local newVol = D.dbToVolume(wantDb)
+				if newVol ~= cur then player:volume(newVol, true) end
+			end
+			self.snap        = nil
+			self.toneEditing = false
+			self:_design()
+			self:_applyNow()
+			self:storeSettings()
+			repaint()
+			return EVENT_CONSUME
+		end
+		return EVENT_UNUSED
+	end)
+
 	self:tieAndShowWindow(window)
 	return window
 end
