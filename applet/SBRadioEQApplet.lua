@@ -191,7 +191,7 @@ for confidently:
      shelves OVERLAPPING into one broad boost. Sizing for that corner left a
      third of the plot unreachable at every ordinary setting.
 
-So 18 accepts that the overlapping-shelf corner clips, by up to 4.32 dB. That is
+So 18 accepts that the overlapping-shelf corner clips, by up to 4.33 dB. That is
 a deliberate trade, confirmed with the user: a curve that fills the graph where
 people actually work, against a flat top at a setting that makes the bass and
 treble controls into the same filter.
