@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 36
+local BUILD = 40
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -173,35 +173,32 @@ local F_LO, F_HI = 40, 16000
 --[[
 VERTICAL RANGE. Half-span in dB, so the plot covers -DB_RANGE..+DB_RANGE.
 
-36, was 16. At 16 the curve CLIPPED: the drawing code pins anything beyond the
-range to the frame, so an extreme two-band boost went flat-topped and stopped
-showing its own shape.
+24, was 16, briefly and wrongly 36.
 
-The plotted peak equals the make-up figure, because each section is
-peak-normalised to 0 dB and then offset by attenDb.
+At 16 the curve CLIPPED: the drawing code pins anything beyond the range to
+the frame, so an extreme curve went flat-topped and stopped showing its shape.
 
-⛔ THE NUMBER TO SIZE AGAINST IS 34.77 dB, not the 26.83 that gets quoted
-around this project. 26.83 is bass +15 / treble +15 at Q 0.9 -- a measurement of
-one setting, not of the control range. Sweeping the range properly (324
-combinations, test_graphrange) the worst plotted peak is 34.77 dB, at
-bass 100 Hz/+15/Q2.0 with treble 1000 Hz/+15/Q2.0. A first attempt at this
-constant used 26.83, chose 28, and still clipped by 6.77 dB.
+⛔ THE PLOTTED PEAK IS NOT attenDb. That mistake set this constant to 36 and
+wasted half the plot. _recomputeCurve draws
 
-The span is asymmetric in practice: boosts run up to about +27, while cuts need
-no make-up and bottom out near -15. A symmetric 28 wastes a little of the lower
-half and keeps the centre line meaningful, which is the better trade when the
-axis carries no numbers.
+    d(f) = attenDb + response(realised1, f) + response(realised2, f)
 
-THE COST, stated because it is real: at 98 px of plot height this is 1.36 px per
-dB, so an everyday +6 dB curve now occupies about 16 px of 98 and reads much
-flatter than it did. Legibility where people actually work has been traded for
-honesty at the extremes. If that reads badly on glass, the alternative is
-autoscaling the frame in steps rather than fixing it here.
+and the two sections are peak-normalised INDEPENDENTLY, at DIFFERENT
+frequencies. Where bass sits at its maximum, treble sits at its floor, so the
+top of the curve is attenDb minus that floor -- never attenDb itself.
+
+MEASURED over 729 combinations of the whole control range: the highest point
+ever drawn is +22.32 dB and the lowest -22.33 dB. At bass 100/+15/Q2.0 with
+treble 3000/+15/Q2.0 the make-up is 34.76 dB while the CURVE spans only
+-1.85..+17.57 -- which at DB_RANGE 36 filled just half the upper half and
+left the rest of the plot unreachable by any setting.
+
+24 covers +/-22.33 with 1.67 dB spare, at 2.04 px/dB.
 
 Gated by test/test_graphrange.lua, which sweeps the control range and fails if
 any reachable setting would clip.
 ]]
-local DB_RANGE   = 36
+local DB_RANGE   = 24
 local NPTS       = 80          -- curve resolution; plenty at 300 px wide
 
 -- Each cell carries its own label: the old layout put "BASS"/"TREB" in a margin
