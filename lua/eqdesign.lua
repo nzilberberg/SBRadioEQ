@@ -211,6 +211,16 @@ end
 
 --------------------------------------------------------------------- public
 
+-- Forward declaration: design() quantises through the response-fitting
+-- quantiser defined further down, the same one designPair uses. It used to use
+-- plain per-coefficient rounding (M.quantize) here, and that was measured as
+-- the continuity failure test_continuity.lua caught: at low bass corners the
+-- num/den sums are only 2-3 LSB, independent rounding lands them a whole LSB
+-- off, and one UI click stepped the realised response 3.83 dB (100 -> 104 Hz,
+-- +12 dB S 0.9) while the ideal moved 0.41 dB. Routed through fitQuantize the
+-- same sweeps measure 0.53 / 0.57 / 1.20 dB worst-step (2026-08-03, on-device).
+local fitQuantize
+
 M.MAX_ERR_DB = 2.0     -- realized vs intended; a GATE on usable range, not the display
 M.MAX_POLE_R = 0.9999  -- margin below the unit circle
 
@@ -261,7 +271,12 @@ function M.design(kind, fs, f0, gainDb, shape, opts)
 			b0, b1, b2 = b0 * k, b1 * k, b2 * k
 		end
 
-		local c = M.quantize(b0, b1, b2, a1, a2)
+		-- Response-fitting quantisation, NOT per-coefficient rounding -- see the
+		-- forward declaration above for the measured continuity defect that plain
+		-- M.quantize caused here. fitQuantize carries its own plain-round +
+		-- pole-repair fallback for degenerate ideals, so the repair loop below is
+		-- a second net that normally never fires.
+		local c = fitQuantize({ b0 = b0, b1 = b1, b2 = b2, a1 = a1, a2 = a2 }, fs)
 		local qb0, qb1, qb2, qa1, qa2 = M.dequantize(c)
 
 		--[[ QUANTISE-THEN-REPAIR.
@@ -557,7 +572,9 @@ local FIT_ACCEPT = 0.15
 local FIT_DD1    = { 0, -1, 1, -3, 3, -6, 6, -10, 10 }
 
 
-local function fitQuantize(x, fs)
+-- Assigns the forward-declared local above (no `local` here: `local function`
+-- would create a fresh variable and leave design()'s upvalue nil).
+function fitQuantize(x, fs)
 	local D1r = math.floor(-x.a1 * M.SCALE_2 + 0.5)
 	local N1  = math.floor(x.b1 * M.SCALE_2 + 0.5)
 	local den = 1 + x.a1 + x.a2
