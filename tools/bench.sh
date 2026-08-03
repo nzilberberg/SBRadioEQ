@@ -62,6 +62,56 @@ done
 SSH="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $SSH_EXTRA"
 SCP="scp -O -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $SSH_EXTRA"
 
+#[[ ⛔ A TIMING RUN ON A BUSY DEVICE IS WORSE THAN NO TIMING RUN.
+#
+# designPair was measured at 391.85 ms and reported as a 3.4x REGRESSION, and a
+# change was withheld from the repo on that basis. The device was not idle: a
+# backgrounded sweep was still consuming its single 360 MHz core. Re-measured on
+# an idle box, the same code was 32.30 ms -- a 3.2x IMPROVEMENT. The number was
+# not merely noisy, it had the wrong SIGN, and it drove a wrong decision.
+#
+# So --framework refuses to run when the device is busy. Refusing is the point:
+# a contaminated measurement that looks plausible is the failure mode, and the
+# only safe output is none.
+#
+# Set BENCH_MAX_LOAD to override (BENCH_MAX_LOAD=99 to force).
+if [ "$FRAMEWORK" -eq 1 ]; then
+	# BASELINE IS NOT ZERO: SqueezePlay runs continuously, so an idle Radio sits
+	# around 0.7-1.0. A second CPU-bound job takes it past ~1.7. 1.5 divides them.
+	MAXLOAD="${BENCH_MAX_LOAD:-1.5}"
+
+	# `pidof jive` is what deploy.sh uses and it is the CRISP signal: exactly one
+	# instance is SqueezePlay, a second is someone else's bench run. Load average
+	# is a one-minute mean and lags a job that just started, so it is the backup.
+	#
+	# ⛔ `wc -w`, never `grep -c`. grep -c PRINTS 0 and EXITS 1 on no match, and
+	# under `set -e` that aborted this script silently -- the first version of
+	# this guard produced no output at all and looked like it had not run.
+	# `|| true` on the whole probe for the same reason.
+	state=$($SSH -n "$RADIO" "cut -d' ' -f1 /proc/loadavg; pidof jive | wc -w" 2>/dev/null || true)
+	load=$(printf '%s\n' "$state" | sed -n 1p)
+	jives=$(printf '%s\n' "$state" | sed -n 2p)
+
+	if [ -z "$load" ] || [ -z "$jives" ]; then
+		echo "FAIL: could not read the device's state -- refusing to time a box whose load is unknown"
+		exit 2
+	fi
+
+	busy=$(awk -v l="$load" -v m="$MAXLOAD" 'BEGIN { print (l > m) ? 1 : 0 }')
+	if [ "$busy" -eq 1 ] || [ "$jives" -gt 1 ]; then
+		echo "REFUSING TO TIME: the device is busy."
+		echo "  load average : $load   (limit $MAXLOAD)"
+		echo "  jive processes: ${jives:-?}   (1 = just SqueezePlay)"
+		echo ""
+		echo "  A timing measurement taken here has been wrong by a factor of 3"
+		echo "  WITH THE WRONG SIGN, and a code change was withheld because of it."
+		echo "  Wait for the device to settle, or set BENCH_MAX_LOAD to override."
+		exit 3
+	fi
+	echo "  device idle (load $load, $jives jive) -- timing is trustworthy" >&2
+fi
+#]]
+
 $SCP "$SCRIPT" $DEPS "$RADIO:/tmp/" >/dev/null
 
 OUT=$(

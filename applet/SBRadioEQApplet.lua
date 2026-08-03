@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 33
+local BUILD = 36
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -170,7 +170,38 @@ local GRAPH_H  = 98
 local CELL_GAP = 3
 
 local F_LO, F_HI = 40, 16000
-local DB_RANGE   = 16
+--[[
+VERTICAL RANGE. Half-span in dB, so the plot covers -DB_RANGE..+DB_RANGE.
+
+36, was 16. At 16 the curve CLIPPED: the drawing code pins anything beyond the
+range to the frame, so an extreme two-band boost went flat-topped and stopped
+showing its own shape.
+
+The plotted peak equals the make-up figure, because each section is
+peak-normalised to 0 dB and then offset by attenDb.
+
+⛔ THE NUMBER TO SIZE AGAINST IS 34.77 dB, not the 26.83 that gets quoted
+around this project. 26.83 is bass +15 / treble +15 at Q 0.9 -- a measurement of
+one setting, not of the control range. Sweeping the range properly (324
+combinations, test_graphrange) the worst plotted peak is 34.77 dB, at
+bass 100 Hz/+15/Q2.0 with treble 1000 Hz/+15/Q2.0. A first attempt at this
+constant used 26.83, chose 28, and still clipped by 6.77 dB.
+
+The span is asymmetric in practice: boosts run up to about +27, while cuts need
+no make-up and bottom out near -15. A symmetric 28 wastes a little of the lower
+half and keeps the centre line meaningful, which is the better trade when the
+axis carries no numbers.
+
+THE COST, stated because it is real: at 98 px of plot height this is 1.36 px per
+dB, so an everyday +6 dB curve now occupies about 16 px of 98 and reads much
+flatter than it did. Legibility where people actually work has been traded for
+honesty at the extremes. If that reads badly on glass, the alternative is
+autoscaling the frame in steps rather than fixing it here.
+
+Gated by test/test_graphrange.lua, which sweeps the control range and fails if
+any reachable setting would clip.
+]]
+local DB_RANGE   = 36
 local NPTS       = 80          -- curve resolution; plenty at 300 px wide
 
 -- Each cell carries its own label: the old layout put "BASS"/"TREB" in a margin

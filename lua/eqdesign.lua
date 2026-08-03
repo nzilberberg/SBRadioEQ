@@ -376,6 +376,62 @@ function M.poleFreq(a1, a2, fs)
 end
 
 --[[
+ARITHMETIC-ONLY RESPONSE EVALUATION, for every loop that runs per knob detent:
+the peak sweeps here and in designPair, the fit search, and the level trim.
+
+responseDb costs four soft-float trig calls plus sqrt and log10 per point --
+measured ~0.26 ms each on this 360 MHz core -- and a designPair call was
+making ~450 of them. But a COMPARISON of responses does not need dB: |H|^2 is
+a monotone proxy (log10 is monotone), so minima, maxima and rankings computed
+on magnitude-squared values are the same ones dB would give. The trig depends
+only on the frequency, so it is precomputed once per fixed frequency list and
+the loop body is pure multiply-add; dB is recovered with a single log10 at
+the very end, on the winner only. Off-grid points (pole needle, refinement)
+still pay their trig, but skip the sqrt and the log10.
+]]
+local TRIG_CACHE = {}     -- keyed by the frequency-list table; entry = { fs, rows }
+local function trigFor(freqs, fs)
+	local e = TRIG_CACHE[freqs]
+	if not e or e.fs ~= fs then
+		e = { fs = fs, rows = {} }
+		for i = 1, #freqs do
+			local w = 2 * math.pi * freqs[i] / fs
+			e.rows[i] = { math.cos(w), math.sin(w), math.cos(2 * w), math.sin(2 * w) }
+		end
+		TRIG_CACHE[freqs] = e
+	end
+	return e.rows
+end
+
+-- |H|^2 at a precomputed trig row; +inf where the denominator vanishes (the
+-- same point responseDb reports +inf dB). The sign of the imaginary parts is
+-- irrelevant to a magnitude.
+local function mag2At(b0, b1, b2, a1, a2, t)
+	local c1, s1, c2, s2 = t[1], t[2], t[3], t[4]
+	local nr = b0 + b1 * c1 + b2 * c2
+	local ni = b1 * s1 + b2 * s2
+	local dr = 1 + a1 * c1 + a2 * c2
+	local di = a1 * s1 + a2 * s2
+	local d2 = dr * dr + di * di
+	if d2 == 0 then return 1 / 0 end
+	return (nr * nr + ni * ni) / d2
+end
+
+-- |H|^2 at an arbitrary frequency (trig computed here, sqrt/log still avoided).
+local function mag2Freq(b0, b1, b2, a1, a2, f, fs)
+	local w = 2 * math.pi * f / fs
+	local c1, s1 = math.cos(w), math.sin(w)
+	local c2, s2 = math.cos(2 * w), math.sin(2 * w)
+	local nr = b0 + b1 * c1 + b2 * c2
+	local ni = b1 * s1 + b2 * s2
+	local dr = 1 + a1 * c1 + a2 * c2
+	local di = a1 * s1 + a2 * s2
+	local d2 = dr * dr + di * di
+	if d2 == 0 then return 1 / 0 end
+	return (nr * nr + ni * ni) / d2
+end
+
+--[[
 Peak response of a QUANTISED section, in dB.
 
 The grid for shape, the pole frequency for the needle, then a local refinement
@@ -386,24 +442,33 @@ a grid dense enough to find it by luck.
 function M.realisedPeakDb(c, fs)
 	if not c then return -1 / 0, 0 end
 	local b0, b1, b2, a1, a2 = M.dequantize(c)
-	local best, bf = -1 / 0, 0
+	local bestM, bf = -1 / 0, 0
+
+	local rowsG = trigFor(M.GRID, fs)
+	for i = 1, #M.GRID do
+		local m = mag2At(b0, b1, b2, a1, a2, rowsG[i])
+		if m > bestM then bestM, bf = m, M.GRID[i] end
+	end
+	local rowsS = trigFor(M.SUB_GRID, fs)                -- clipping below 40 Hz
+	for i = 1, #M.SUB_GRID do
+		local m = mag2At(b0, b1, b2, a1, a2, rowsS[i])
+		if m > bestM then bestM, bf = m, M.SUB_GRID[i] end
+	end
 
 	local function try(f)
 		if f and f > 0 and f < fs / 2 then
-			local v = M.responseDb(b0, b1, b2, a1, a2, f, fs)
-			if v > best then best, bf = v, f end
+			local m = mag2Freq(b0, b1, b2, a1, a2, f, fs)
+			if m > bestM then bestM, bf = m, f end
 		end
 	end
-
-	for i = 1, #M.GRID do try(M.GRID[i]) end
-	for i = 1, #M.SUB_GRID do try(M.SUB_GRID[i]) end   -- clipping below 40 Hz
 	try(M.poleFreq(a1, a2, fs))
 	try(fs / 2 - 1)                                  -- Nyquist edge
 
 	local lo, hi = bf * 0.85, bf * 1.15
 	for i = 0, 24 do try(lo + (hi - lo) * i / 24) end
 
-	return best, bf
+	if bestM == -1 / 0 then return -1 / 0, bf end
+	return 10 * log10(bestM), bf
 end
 
 -- Highest shape value that verifies at this frequency/gain -- drives the UI's
@@ -458,29 +523,39 @@ MEASURED, 150-point sweep of the bass lattice (100-288 Hz corners, gains
     independent rounding:  worst 7.33 dB   mean 0.70 dB
     fit-quantisation:      worst 1.14 dB   mean 0.18 dB
 
-The residual 1.14 dB (at 100 Hz / +15 / S 2.0) is a representability floor,
-not a search failure: a brute-force sweep over a much wider integer
-neighbourhood (D1 +/-10, dInt +/-2..+3, zero-spread N1 +/-48, both nInt) found
-nothing better than 1.13 dB. With ideal sums of ~2.8 LSB the chip's lattice of
-realisable low-shelf corners and DC ratios is simply that coarse. This is why
-the drawn curve comes from the REALISED sections (see designPair): below
-~150 Hz at high gain no drawable ideal exists that the chip can honour to
-better than ~1 dB.
+The residual 1.14 dB (at 100 Hz / +15 / S 2.0) was called a representability
+floor here, backed by a brute-force sweep (D1 +/-10, dInt +/-2..+3, N1 +/-48)
+that found nothing better than 1.13 dB. RE-MEASURED 2026-08-03: that figure is
+the floor of a FIXED-LEVEL comparison only. attenDb now carries a level trim
+(see designPair), which absorbs the level component of the quantisation error,
+and under the trimmed metric the same settings measure 0.95 dB (100/+12/S2.0)
+and 0.76 dB (100/+15) against the request -- under the 1.0 dB the graph test
+demands. Two deeper facts, both measured on the device, for whoever next tries
+to push below that: (1) candidates realising ~0.75 dB exist inside a wider box
+(N1 varied, D1 +/-15), but every one found peaks ABOVE unity, so the
+correction pass rescales and re-quantises it onto a different lattice point
+and the gain evaporates -- 0.96 dB shipped when tried; (2) with the numerator
+deliberately scaled DOWN up to 1.5 dB (level bought back by the trim) a
+peak-clean 0.73 dB candidate exists (N0=5920 N1=-5868 N2=5818 D1=32639
+D2=-32513 for 100/+12/S2.0), but reaching it needs a scale-scanning,
+peak-constrained search: scale and N1 are coupled (0.1 dB of scale is ~50 LSB
+of N1), so no affordable per-detent grid covers that space. The drawn curve
+still comes from the REALISED sections (see designPair) because whatever gap
+remains is real and belongs on screen.
 
-Cost, measured with the SDL wall clock (validated against os.time each run):
-the search path is ~58 ms and only runs when the cheap sum-fix candidate
-misses 0.15 dB (low bass corners); everywhere else the sum-fix is accepted at
-~5 ms. This is paid for by designPair no longer recomputing realisedPeakDb for
-diag when correct() already measured it, and by FLAT sections getting their
-peak as a constant. Measured on the same 14-setting workload before and after
-the change: 215.8 -> 215.9 ms per designPair call (identical); the worst
-corner with one active band (100 Hz / +15 / S 2.0) is 116.0 ms, a typical
-mid-band click 153.9 ms.
+Cost: the search only runs when the cheap sum-fix candidate misses 0.15 dB
+(low bass corners); everywhere else the sum-fix is accepted immediately. Since
+the arithmetic-only rewrite (trig rows + magnitude-squared comparisons,
+2026-08-03), designPair makes ZERO responseDb calls; measured on the device
+with Framework:getTicks over 20 iterations: a typical detent (bass 150 / +10 /
+S 1.0, treble flat) is 29.80 ms and the worst corner (100 / +15 / S 2.0) is
+53.40 ms, from 110.30 / 112.20 ms before the rewrite.
 ]]
 
 local FIT_EVAL   = { 40, 55, 75, 105, 145, 200, 280, 460, 900, 3000 }
 local FIT_ACCEPT = 0.15
 local FIT_DD1    = { 0, -1, 1, -3, 3, -6, 6, -10, 10 }
+
 
 local function fitQuantize(x, fs)
 	local D1r = math.floor(-x.a1 * M.SCALE_2 + 0.5)
@@ -516,26 +591,46 @@ local function fitQuantize(x, fs)
 
 	if den > 0 and gDC == gDC and gDC ~= 1 / 0 and gDC ~= -1 / 0 then
 		local sI = den * M.SCALE
+		local trig = trigFor(FIT_EVAL, fs)
 		local gi
-		local function score(c, cap)
+		--[[ SHIFT-INVARIANT SCORE, in the ratio domain.
+
+		designPair charges a level trim to attenDb after quantisation (see
+		there), so a candidate whose error is a uniform offset costs nothing --
+		the make-up absorbs it. What cannot be absorbed is the SPREAD of the
+		error across frequency: in dB, (max - min) / 2 after the optimal shift.
+		Scoring by max |error| rejected candidates whose shape was right but
+		whose level sat off-centre; measured at bass 100 Hz / +12 dB / S 2.0
+		the old metric kept a candidate spanning [-0.41, +1.48] dB (1.48 to the
+		test) when the lattice held a narrower one that trims to under 1 dB.
+
+		The score is the RATIO mxR/mnR of realised-to-ideal |H|^2 across
+		FIT_EVAL -- a monotone image of the dB spread (spreadDb =
+		5*log10(mxR/mnR)), so rankings, the accept threshold and the
+		cannot-win cutoff are the dB ones exactly, with no trig or log in the
+		loop. NaN anywhere still condemns the candidate.
+		]]
+		local function score(c, capR)
 			if not gi then
 				gi = {}
-				for k, f in ipairs(FIT_EVAL) do
-					gi[k] = M.responseDb(x.b0, x.b1, x.b2, x.a1, x.a2, f, fs)
+				for k = 1, #FIT_EVAL do
+					gi[k] = mag2At(x.b0, x.b1, x.b2, x.a1, x.a2, trig[k])
 				end
 			end
 			local b0, b1, b2, a1, a2 = M.dequantize(c)
-			local e = 0
-			for k, f in ipairs(FIT_EVAL) do
-				local d = math.abs(M.responseDb(b0, b1, b2, a1, a2, f, fs) - gi[k])
-				if d ~= d then return 1 / 0 end
-				if d > e then
-					e = d
-					if e >= cap then return e end     -- cannot win; stop scoring
-				end
+			local mnR, mxR = 1 / 0, 0
+			for k = 1, #FIT_EVAL do
+				local r = mag2At(b0, b1, b2, a1, a2, trig[k]) / gi[k]
+				if r ~= r then return 1 / 0 end
+				if r < mnR then mnR = r end
+				if r > mxR then mxR = r end
+				if mxR >= capR * mnR then return 1 / 0 end   -- cannot win; stop
 			end
-			return e
+			local B = mxR / mnR
+			if B ~= B then return 1 / 0 end
+			return B
 		end
+		local FIT_ACCEPT_R = 10 ^ (FIT_ACCEPT / 5)   -- spreadDb <= FIT_ACCEPT
 
 		local dInt0 = math.max(1, math.floor(sI + 0.5))
 		local nR0   = math.floor(gDC * dInt0 + 0.5)
@@ -544,7 +639,7 @@ local function fitQuantize(x, fs)
 		local c0 = build(dInt0, D1r, nR0)
 		if c0 then
 			best, bestc = score(c0, 1 / 0), c0
-			if best <= FIT_ACCEPT then return bestc end
+			if best <= FIT_ACCEPT_R then return bestc end
 		end
 		for _, dd in ipairs({ 0, -1, 1 }) do
 			local dInt = dInt0 + dd
@@ -613,11 +708,6 @@ function M.designPair(fs, b1, b2)
 		return x
 	end
 
-	local function resp(x, f)
-		if not x then return 0 end
-		return M.responseDb(x.b0, x.b1, x.b2, x.a1, x.a2, f, fs)
-	end
-
 	--[[
 	Peak of an unquantised design -- grid, POLE FREQUENCY, and a refinement pass.
 
@@ -633,21 +723,30 @@ function M.designPair(fs, b1, b2)
 	]]
 	local function peakOf(x)
 		if not x then return -1 / 0 end
-		local best, bf = -1 / 0, 0
+		local bestM, bf = -1 / 0, 0
+		local rowsG = trigFor(grid, fs)
+		for i = 1, #grid do
+			local m = mag2At(x.b0, x.b1, x.b2, x.a1, x.a2, rowsG[i])
+			if m == m and m > bestM then bestM, bf = m, grid[i] end   -- m == m rejects NaN
+		end
+		local rowsS = trigFor(M.SUB_GRID, fs)             -- clipping below 40 Hz
+		for i = 1, #M.SUB_GRID do
+			local m = mag2At(x.b0, x.b1, x.b2, x.a1, x.a2, rowsS[i])
+			if m == m and m > bestM then bestM, bf = m, M.SUB_GRID[i] end
+		end
 		local function at(f)
 			if not (f and f > 0 and f < fs / 2) then return end
-			local v = resp(x, f)
-			if v == v and v > best then best, bf = v, f end   -- v == v rejects NaN
+			local m = mag2Freq(x.b0, x.b1, x.b2, x.a1, x.a2, f, fs)
+			if m == m and m > bestM then bestM, bf = m, f end
 		end
-		for i = 1, #grid do at(grid[i]) end
-		for i = 1, #M.SUB_GRID do at(M.SUB_GRID[i]) end   -- clipping below 40 Hz
 		at(M.poleFreq(x.a1, x.a2, fs))
 		at(fs / 2 - 1)
 		if bf > 0 then
 			local lo, hi = bf * 0.85, bf * 1.15
 			for i = 0, 24 do at(lo + (hi - lo) * i / 24) end
 		end
-		return best
+		if bestM == -1 / 0 then return -1 / 0 end
+		return 10 * log10(bestM)
 	end
 
 	local function scaleTo0(x)
@@ -703,14 +802,32 @@ function M.designPair(fs, b1, b2)
 	   64-point grid cannot see either section's needle, so the candidate set is
 	   the grid plus BOTH pole frequencies plus a refinement around the winner.
 	]]
-	local peak2, pf2 = -1 / 0, 0
+	local peakM, pf2 = -1 / 0, 0
+	do
+		local rowsG = trigFor(grid, fs)
+		for i = 1, #grid do
+			local t = rowsG[i]
+			local m = 1
+			if r1 then m = m * mag2At(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, t) end
+			if r2 then m = m * mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, t) end
+			if m == m and m > peakM then peakM, pf2 = m, grid[i] end
+		end
+		local rowsS = trigFor(M.SUB_GRID, fs)             -- clipping below 40 Hz
+		for i = 1, #M.SUB_GRID do
+			local t = rowsS[i]
+			local m = 1
+			if r1 then m = m * mag2At(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, t) end
+			if r2 then m = m * mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, t) end
+			if m == m and m > peakM then peakM, pf2 = m, M.SUB_GRID[i] end
+		end
+	end
 	local function pairAt(f)
 		if not (f and f > 0 and f < fs / 2) then return end
-		local g = resp(r1, f) + resp(r2, f)
-		if g == g and g > peak2 then peak2, pf2 = g, f end
+		local m = 1
+		if r1 then m = m * mag2Freq(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, f, fs) end
+		if r2 then m = m * mag2Freq(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, f, fs) end
+		if m == m and m > peakM then peakM, pf2 = m, f end
 	end
-	for i = 1, #grid do pairAt(grid[i]) end
-	for i = 1, #M.SUB_GRID do pairAt(M.SUB_GRID[i]) end   -- clipping below 40 Hz
 	if r1 then pairAt(M.poleFreq(r1.a1, r1.a2, fs)) end
 	if r2 then pairAt(M.poleFreq(r2.a1, r2.a2, fs)) end
 	pairAt(fs / 2 - 1)
@@ -718,6 +835,8 @@ function M.designPair(fs, b1, b2)
 		local lo, hi = pf2 * 0.85, pf2 * 1.15
 		for i = 0, 24 do pairAt(lo + (hi - lo) * i / 24) end
 	end
+	local peak2 = -1 / 0
+	if peakM ~= -1 / 0 then peak2 = 10 * log10(peakM) end
 
 	local k2 = 0
 	if peak2 > 0 and peak2 == peak2 and peak2 ~= 1 / 0 and r2 then
@@ -880,13 +999,67 @@ function M.designPair(fs, b1, b2)
 	}
 
 	--[[
+	LEVEL TRIM: attenDb is the make-up the volume restores, so the correct value
+	is the one that best restores the REQUEST given the integers the chip
+	actually got -- not the amount the ideal design was scaled by.
+
+	Quantisation at low corners moves the realised level off the scaled ideal by
+	a frequency-dependent amount whose MIDPOINT is pure level: measured at bass
+	100 Hz / +15 dB / S 2.0 the signed realised-vs-ideal error spanned
+	[-1.14, +0.38] dB, i.e. 0.38 dB of it was a level mis-allocation that the
+	make-up could carry instead of the filter. Centring the error band halves the
+	worst deviation the listener (and test_graphtruth) sees, and touches no
+	coefficient -- the clip invariants (realised peak <= 0 dB) are untouched.
+
+	Single pass, no iteration, bounded by construction: the shift is half the
+	error spread, capped at 3 dB against degenerate designs. Skipped when the
+	safety net fired, because centring a FLAT stand-in against a live ideal
+	would swing the volume for a band that is not running.
+	]]
+	local trim = 0
+	if (r1 or r2) and not (caught1 or caught2) then
+		--[[ Ratio domain, like the fit score: the signed dB error at f is
+		10*log10(P) for P = product over sections of realised/ideal |H|^2, and
+		log10 is monotone -- so the extremes of P are the extremes of the dB
+		error, found with no trig (rows are precomputed for the fixed grid) and
+		no log inside the loop. The midpoint of the dB band is then
+		(10*log10(mnP) + 10*log10(mxP)) / 2 = 5*log10(mnP*mxP), two logs total.
+		]]
+		local rows = trigFor(grid, fs)
+		local v1 = r1 and { M.dequantize(q1) } or nil
+		local v2 = r2 and { M.dequantize(q2) } or nil
+		local mnP, mxP = 1 / 0, -1 / 0
+		for i = 1, #grid do
+			local t = rows[i]
+			local P = 1
+			if v1 then
+				P = P * (mag2At(v1[1], v1[2], v1[3], v1[4], v1[5], t)
+				         / mag2At(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, t))
+			end
+			if v2 then
+				P = P * (mag2At(v2[1], v2[2], v2[3], v2[4], v2[5], t)
+				         / mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, t))
+			end
+			if P == P and P < mnP then mnP = P end
+			if P == P and P > mxP then mxP = P end
+		end
+		if mnP <= mxP then
+			trim = -5 * log10(mnP * mxP)
+			if trim ~= trim then trim = 0 end     -- 0 * inf: no usable midpoint
+			if trim > 3 then trim = 3 elseif trim < -3 then trim = -3 end
+		end
+	end
+
+	--[[
 	A pure cut must cost nothing. Quantisation ripple can leave a hair of
 	positive peak on a cut-only design (measured 0.11 dB), and charging make-up
 	for a cut would raise the volume when the user asked for less. Round it away
-	rather than bill it.
+	rather than bill it. The trim above can also leave a small NEGATIVE total on
+	a cut-only design; same rule, same reason.
 	]]
-	local atten = k1 + k2
-	if atten < 0.25 and atten > 0 then atten = 0 end
+	local atten = k1 + k2 + trim
+	if atten < 0.25 and atten > -0.25 then atten = 0 end
+	if atten < 0 then atten = 0 end     -- make-up is a boost; never charge a cut
 
 	--[[
 	THE DRAWN CURVE IS THE REALISED FILTER. realised1/realised2 are float views of the
@@ -906,7 +1079,7 @@ function M.designPair(fs, b1, b2)
 	end
 
 	return q1, q2,
-	       { attenDb = atten, k1 = k1, k2 = k2,
+	       { attenDb = atten, k1 = k1, k2 = k2, trimDb = trim,
 	         realised1 = view(q1), realised2 = view(q2), ok = true,
 	         diag = diag }
 end
