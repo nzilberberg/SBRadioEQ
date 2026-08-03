@@ -59,7 +59,25 @@ local function literals(path)
 		lineNo = lineNo + 1
 		-- ignore comment-only lines so prose cannot masquerade as UI text
 		if not line:match("^%s*%-%-") then
-			for lit in line:gmatch('"([^"\\]*)"') do
+			--[[
+			⛔ STRING-TABLE KEYS ARE NOT DRAWN TEXT. Strip self:string("KEY")
+			before scanning.
+
+			This gate exists to catch the same words PAINTED TWICE -- the
+			doubled status line that shipped. When the menus moved to
+			self:string() lookups the keys became the longest literals in the
+			file, and the gate started reporting SBRADIOEQ_TONE_CONTROL against
+			SBRADIOEQ_TONE, SBRADIOEQ_RESET against SBRADIOEQ_RESET_CANCEL, and
+			three more of the same shape -- five false positives on a correct
+			applet.
+
+			A key is an INDEX into strings.txt; the text a user reads lives
+			there, not here. Two keys sharing a prefix is how a namespace works.
+			A gate that fires on its own project's naming convention gets
+			switched off, and then it defends nothing.
+			]]
+			local scan = line:gsub('self:string%s*%(%s*"[^"]*"%s*%)', "")
+			for lit in scan:gmatch('"([^"\\]*)"') do
 				local n = normalise(lit)
 				if #n >= MIN_LEN and not lit:match("^%%") then
 					if not seen[lit] then
