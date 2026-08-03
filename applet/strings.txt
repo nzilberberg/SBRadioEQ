@@ -3,3 +3,18 @@ SBRADIOEQ
 
 SBRADIOEQ_HELP
 	EN	Two-band equalizer using the Radio's built-in audio processor.
+
+SBRADIOEQ_MENU
+	EN	Tone Controls
+
+SBRADIOEQ_TONE_CONTROL
+	EN	Tone Control
+
+SBRADIOEQ_TONE
+	EN	Tone
+
+SBRADIOEQ_LOUDNESS
+	EN	Loudness
+
+SBRADIOEQ_RESET
+	EN	Reset Tone

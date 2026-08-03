@@ -26,6 +26,8 @@ local ipairs, pairs, tostring, type, math, string, pcall, require =
 local oo         = require("loop.simple")
 local Applet     = require("jive.Applet")
 local Window     = require("jive.ui.Window")
+local SimpleMenu = require("jive.ui.SimpleMenu")
+local Checkbox   = require("jive.ui.Checkbox")
 local Canvas     = require("jive.ui.Canvas")
 local Surface    = require("jive.ui.Surface")
 local Framework  = require("jive.ui.Framework")
@@ -89,7 +91,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 17
+local BUILD = 19
 
 local C_BAR       = 0x000000C4     -- title / status strips
 local C_BAR_EDGE  = 0xFFFFFF26
@@ -667,6 +669,72 @@ function _headroomDb(self)
 end
 
 ------------------------------------------------------------------- window
+
+--[[
+THE TONE MENU -- the screen in front of the EQ.
+
+SKELETON. Only the Equalizer row is wired; the other four are placeholders for
+screens that do not exist yet, and they are deliberately inert. They carry NO
+callback rather than an empty one, so pressing them does nothing at all instead
+of playing a transition sound and going nowhere.
+
+Built from the stock widgets the device's own settings screens use --
+SimpleMenu + Checkbox with style 'item_choice' -- rather than the Canvas the EQ
+screen needs. The EQ draws a response curve, which is why it owns its pixels; a
+list of five rows does not, and hand-drawing one would diverge from the skin the
+moment anything about it changed.
+]]
+function menuShow(self, menuItem)
+	local window = Window("text_list", menuItem and menuItem.text or "Tone Controls",
+	                      'settingstitle')
+	local menu   = SimpleMenu("menu")
+
+	-- 1. Tone Control -- will become the bypass toggle.
+	--
+	-- NOT WIRED, and the initial state is a literal rather than a read of
+	-- settings.enabled on purpose. A checkbox that displays the real state but
+	-- does nothing when toggled is worse than one that is plainly disconnected:
+	-- it would show "on", accept the press, and silently not bypass.
+	menu:addItem({
+		text   = self:string("SBRADIOEQ_TONE_CONTROL"),
+		style  = 'item_choice',
+		weight = 1,
+		check  = Checkbox("checkbox", function(_, _) end, true),
+	})
+
+	-- 2. Tone -- bass/treble sliders. Not built.
+	menu:addItem({
+		text   = self:string("SBRADIOEQ_TONE"),
+		weight = 2,
+	})
+
+	-- 3. Equalizer -- the one live row.
+	menu:addItem({
+		text     = self:string("SBRADIOEQ"),
+		sound    = "WINDOWSHOW",
+		weight   = 3,
+		callback = function(event, item)
+				   self:settingsShow(item)
+			   end,
+	})
+
+	-- 4. Loudness -- not built.
+	menu:addItem({
+		text   = self:string("SBRADIOEQ_LOUDNESS"),
+		weight = 4,
+	})
+
+	-- 5. Reset Tone -- leads to a confirm screen. Not built.
+	menu:addItem({
+		text   = self:string("SBRADIOEQ_RESET"),
+		weight = 5,
+	})
+
+	window:addWidget(menu)
+	self:tieAndShowWindow(window)
+	return window
+end
+
 
 function settingsShow(self, menuItem)
 	local window = Window("text_list", menuItem and menuItem.text or "Equalizer",

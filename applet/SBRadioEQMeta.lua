@@ -74,8 +74,12 @@ function registerApplet(meta)
 	]]
 	meta:registerService("sbRadioEQApply")
 
-	jiveMain:addItem(meta:menuItem('appletSBRadioEQ', 'settingsAudio', "SBRADIOEQ",
-		function(applet, ...) applet:settingsShow(...) end))
+	-- Settings > Audio Settings now opens the TONE MENU, not the EQ directly.
+	-- The EQ is one row inside it. SBRADIOEQ_MENU names the parent so the
+	-- SBRADIOEQ string stays with the EQ itself, which is both the row's label
+	-- and that window's title.
+	jiveMain:addItem(meta:menuItem('appletSBRadioEQ', 'settingsAudio', "SBRADIOEQ_MENU",
+		function(applet, ...) applet:menuShow(...) end))
 end
 
 

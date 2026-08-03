@@ -230,7 +230,19 @@ $SSH "$RADIO" "rm -rf $DEST.old" >/dev/null 2>&1 || true
 SUCCESS=1
 echo ""
 echo "DEPLOYED build $next."
+# The menu path is DERIVED from strings.txt, not typed here. It was typed here
+# once, the EQ moved one level down behind a Tone Controls menu, and this line
+# went on confidently naming a path that no longer existed. A deploy script that
+# tells you where to look is only useful if it cannot be wrong.
+label() { sed -n "/^$1\$/{n;s/^\tEN\t//p;}" "$HERE/applet/strings.txt"; }
+MENU_LABEL=$(label SBRADIOEQ_MENU)
+EQ_LABEL=$(label SBRADIOEQ)
+
 echo "The Equalizer screen does NOT survive a restart -- reopen it:"
-echo "  Settings > Audio Settings > Equalizer"
+if [ -n "$MENU_LABEL" ] && [ -n "$EQ_LABEL" ]; then
+	echo "  Settings > Audio Settings > $MENU_LABEL > $EQ_LABEL"
+else
+	echo "  Settings > Audio Settings  (menu labels unreadable from strings.txt)"
+fi
 echo "The status bar's bottom-right corner must read  b$next"
 echo "If it reads anything else, you are looking at an older render."
