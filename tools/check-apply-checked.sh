@@ -1,34 +1,30 @@
 #!/bin/sh
-# SBRadioEQ -- settings must not be persisted after an apply nobody checked.
+# SBRadioEQ -- a failed hardware apply must be UNWOUND and VISIBLE.
 #
 #   sh tools/check-apply-checked.sh
 #
-# ⛔ KNOWN RED as of build 42. This gate currently FAILS on the real applet, by
-# design: it is the acceptance test for the audio-transaction work, written
-# before the fix rather than after it. A gate authored after its fix passes on
-# the first run and has never been seen to bite, which is not evidence of
-# anything. It turns green when the call sites below start consulting a result.
+# WHAT THIS GUARDS, AND WHY IT IS NOT WHAT THE FIRST VERSION GUARDED
 #
-# THE DEFECT IT GUARDS
+# The first version of this gate required every call site to consult the result
+# of _applyNow() before calling storeSettings(). That encoded a MECHANISM, and
+# the wrong one: persisting the desired curve is legitimate, the defect is the
+# failure going unhandled. Written that way the gate would have fired on the
+# correct fix -- and a gate that fires on correct code gets switched off. The
+# rule now names the two PROPERTIES that actually have to hold, wherever the
+# code chooses to implement them.
 #
-# _applyNow() returns nothing, in both its success and its failure branch. So
-# every caller that follows it with storeSettings() persists the REQUESTED curve
-# as though it were the APPLIED one, and no caller can tell the difference.
+#   A. A failure must be VISIBLE.   self.hwError was set and logged and read by
+#      nothing, so a failed write showed the user a graph of the curve it had
+#      just failed to apply. A written-but-never-read field is not reporting.
 #
-# That is not cosmetic. On failure _applyNow deliberately does not run level
-# matching -- correct, because raising the volume over attenuation that was never
-# applied is the loud-audio bug this project already shipped once. But the make-up
-# ALREADY folded into the player volume stays there, and the hardware may by then
-# have been forced to bypass. The worst instance is Reset Tone: it flattens the
-# curve, stores flat settings, logs success, and can leave up to ~27 dB of make-up
-# over a flat curve with nothing on screen to say so.
+#   B. A failure must be UNWOUND.   Refusing to add NEW make-up is half the job.
+#      The previous curve's make-up is already in the player volume, and the
+#      failure path has very likely dropped the filter -- so the attenuation is
+#      gone and up to ~27 dB of compensation is not. The unwind must be
+#      conditional on the bypass being CONFIRMED, not merely attempted.
 #
-# THE RULE
-#
-# A call to self:_applyNow() / self:_flushApply() whose return value is DISCARDED
-# may not be followed, within a few lines, by self:storeSettings() or a success
-# log. Binding the result is not enough on its own -- the bound name must actually
-# be read before the persist, or it is a variable, not a check.
+#   C. The result must be RETURNABLE.  _applyNow returned nothing in both
+#      branches, so no caller could tell applied from failed even if it wanted to.
 #
 # Exit 0 clean, 1 violations, 2 the gate could not run.
 
@@ -36,77 +32,106 @@ set -e
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 APPLET="$HERE/applet/SBRadioEQApplet.lua"
-LOOKAHEAD=4
 
 [ -f "$APPLET" ] || { echo "FAIL(2): $APPLET not found -- gate cannot run"; exit 2; }
 
-# ⛔ REFUSE TO PASS VACUOUSLY. If the apply calls are renamed or restructured,
-# this gate would scan for a pattern that no longer exists, find nothing, and
-# report clean about a file it did not understand. An empty match set is a
-# harness failure here, never a verdict. (Same trap as check-footprint.sh's
-# unreadable-RUNTIME abort.)
-calls=$(grep -cE 'self:(_applyNow|_flushApply)\(\)' "$APPLET" || true)
-if [ "$calls" -eq 0 ]; then
-	echo "FAIL(2): no self:_applyNow()/self:_flushApply() calls found in the applet."
-	echo "         Either the file changed shape or the pattern is stale -- this gate"
-	echo "         must not report clean about a file it cannot read."
+# ⛔ REFUSE TO PASS VACUOUSLY. If _applyNow is renamed or restructured, a
+# scan-for-a-pattern gate finds nothing and reports clean about a file it did not
+# understand. An empty extraction is a harness failure, never a verdict.
+body=$(awk '/^function _applyNow\(self\)/{f=1} f{print} f&&/^end$/{exit}' "$APPLET")
+[ -n "$body" ] || {
+	echo "FAIL(2): could not extract _applyNow from the applet."
+	echo "         The function was renamed or reshaped -- this gate must not"
+	echo "         report clean about code it cannot find."
 	exit 2
+}
+
+bad=0
+
+# --- A. the failure state is BRANCHED ON, not merely mentioned -------------
+#
+# ⛔ "NOT AN ASSIGNMENT" IS TOO WEAK A DEFINITION OF A READ, and this gate was
+# written that way first. On the DEFECTIVE code it counted the `log:warn(...,
+# self.hwError, ...)` line as a consumer and passed -- a false negative on the
+# exact defect it exists to catch, found by asking what it would have said
+# before the fix rather than by trusting the green.
+#
+# Logging is not reporting: syslog on a headless device is not a user-visible
+# channel, and a comment mentioning the field counts for even less. What makes a
+# failure visible is code that BRANCHES on it and draws something.
+reads=$(grep -cE '(if|elseif)[[:space:]]+(not[[:space:]]+)?self\.hwError|self\.hwError[[:space:]]+and' "$APPLET" || true)
+if [ "$reads" -eq 0 ]; then
+	echo "FAIL: self.hwError is never branched on -- only assigned, logged, or"
+	echo "      mentioned. A failed apply would be invisible: the screen keeps"
+	echo "      showing the curve that was requested, not what the chip is running."
+	bad=$((bad + 1))
+else
+	echo "  ok   the failure state is branched on in $reads place(s) -- it is shown"
 fi
 
-report=$(awk -v LOOK="$LOOKAHEAD" '
-	{ line[NR] = $0 }
-	END {
-		bad = 0
-		for (i = 1; i <= NR; i++) {
-			if (line[i] !~ /self:(_applyNow|_flushApply)\(\)/) continue
-
-			# Is the result bound to a name?  local x = self:_applyNow()
-			bound = 0; var = ""
-			if (match(line[i], /^[ \t]*(local[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*self:(_applyNow|_flushApply)\(\)/)) {
-				bound = 1
-				t = line[i]
-				sub(/^[ \t]*/, "", t)
-				sub(/^local[ \t]+/, "", t)
-				sub(/[ \t]*=.*$/, "", t)
-				var = t
-			}
-
-			# Look ahead for a persist / success log, and for a read of var.
-			read = 0
-			for (j = i + 1; j <= NR && j <= i + LOOK; j++) {
-				if (bound && var != "" && line[j] ~ ("[^A-Za-z0-9_]" var "[^A-Za-z0-9_]?")) read = 1
-
-				if (line[j] ~ /self:storeSettings\(\)/ || line[j] ~ /log:info\(/) {
-					if (!bound) {
-						printf "  line %d: %s\n", i, trim(line[i])
-						printf "          -> line %d persists/announces: %s\n", j, trim(line[j])
-						printf "          result of the apply is DISCARDED\n"
-						bad++
-					} else if (!read) {
-						printf "  line %d: %s\n", i, trim(line[i])
-						printf "          -> line %d persists/announces: %s\n", j, trim(line[j])
-						printf "          %s is assigned but never read before the persist\n", var
-						bad++
-					}
-					break
-				}
-			}
-		}
-		printf "COUNT=%d\n", bad
+# --- B. the unwind, and its condition -------------------------------------
+#
+# ⛔ GREPPING THE WHOLE BODY FOR "safeBypassed" IS NOT A CHECK OF THE CONDITION.
+# Written that way, this passed a fixture whose guard had been replaced by
+# `if true then`, because the word still appeared in the log line below it. The
+# guard has to be checked WHERE IT GUARDS -- immediately above the unwind.
+unwind=$(echo "$body" | awk '
+	/_levelMatch\(0\)/ { hit = NR
+		for (j = NR - 3; j < NR; j++)
+			if (j > 0 && prev[j] ~ /safeBypassed/) { print "guarded"; exit }
+		print "unguarded"; exit
 	}
-	function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-' "$APPLET")
+	{ prev[NR] = $0 }
+	END { if (!hit) print "absent" }
+')
+case "$unwind" in
+	guarded)
+		echo "  ok   make-up is unwound on failure, guarded by a CONFIRMED bypass" ;;
+	unguarded)
+		echo "FAIL: the unwind is not guarded by safeBypassed."
+		echo "      Lowering the volume when the filter may still be applying its cut"
+		echo "      is a guess. The confirmation is what makes the unwind safe."
+		bad=$((bad + 1)) ;;
+	*)
+		echo "FAIL: _applyNow never unwinds the existing make-up on failure."
+		echo "      Declining to ADD compensation is not enough -- the previous curve's"
+		echo "      make-up stays in the player volume over a filter that has just been"
+		echo "      bypassed. That is the loud-audio failure, reached from the other side."
+		bad=$((bad + 1)) ;;
+esac
 
-count=$(echo "$report" | sed -n 's/^COUNT=//p')
-body=$(echo "$report" | grep -v '^COUNT=' || true)
+# --- C. callers can tell applied from failed -------------------------------
+#
+# ⛔ CHECK THAT THE FUNCTION CANNOT FALL OFF ITS END -- not that a return exists
+# somewhere. Two weaker versions of this check each passed a mutant:
+#
+#   grep 'return res'          the SUCCESS branch says that too.
+#   last line matching return  once the failure return is gone, the last match
+#                              is the success branch's, so removing the failure
+#                              path's return reads as still present.
+#
+# The property is that the LAST STATEMENT of the body is a return carrying a
+# value: a failure path that falls off the end returns nil, and nil is what every
+# caller then has to interpret.
+laststmt=$(echo "$body" | sed '$d' | grep -vE '^[[:space:]]*(--.*)?$' | grep -vE '^[[:space:]]*(\]\]|--\[\[)' | tail -1)
+#
+# ⛔ AND ANCHOR IT. `case "$laststmt" in *return\ *)` matches "return" ANYWHERE in
+# the line, so `if false then return {...}` -- a statement that returns only on a
+# condition that is never true -- read as a return. The third wrong version of
+# this one check. Anchor at the start of the statement.
+if echo "$laststmt" | grep -qE '^[[:space:]]*return[[:space:]]'; then
+	echo "  ok   the failure path returns a result, so a caller can branch on it"
+else
+	echo "FAIL: _applyNow can fall off its end, returning nil to the caller."
+	echo "      Its last statement is:$laststmt"
+	echo "      A caller cannot distinguish that from a successful apply."
+	bad=$((bad + 1))
+fi
 
-if [ "$count" -eq 0 ]; then
-	echo "check-apply-checked: clean -- every persist follows a checked apply ($calls apply calls)"
+echo ""
+if [ "$bad" -eq 0 ]; then
+	echo "check-apply-checked: a failed apply is unwound and visible"
 	exit 0
 fi
-
-echo "check-apply-checked: $count site(s) persist settings after an unchecked apply"
-echo ""
-echo "$body"
-echo "the requested curve is being saved as though the hardware had taken it."
+echo "check-apply-checked: $bad property/properties not held"
 exit 1

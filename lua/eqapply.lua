@@ -447,29 +447,61 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
 	]]
 	local okWrite, n = pcall(M.applyBSPDiff, bsp, c1, c2, prev, bypass, prevBypass)
 
-	-- A partial coefficient set must never be left RUNNING. Bypass while still
-	-- muted, so nothing is audible even if this also fails.
+	--[[
+	A partial coefficient set must never be left RUNNING. Bypass while still
+	muted, so nothing is audible even if this also fails.
+
+	⛔ THE RESULT OF THIS BYPASS IS THE WHOLE POINT -- it used to be discarded.
+	"We tried to make it safe" and "it is safe" are different facts, and the
+	caller needs the second one: only a CONFIRMED bypass means the attenuation is
+	gone, and only then may the make-up gain be unwound from the player volume.
+	Unwinding against a filter that might still be cutting makes it quiet; NOT
+	unwinding against a filter that is definitely bypassed makes it loud.
+
+	MEASURED 2026-08-03: bsp:setMixer THROWS on failure ("mixer element <name>
+	not found") and returns nil on success, so pcall is the right instrument --
+	there is no status value to inspect.
+	]]
+	local safeBypassed = nil
 	if not okWrite then
-		pcall(function() bsp:setMixer(M.NAME.enable, M.BYPASS) end)
+		safeBypassed = pcall(function() bsp:setMixer(M.NAME.enable, M.BYPASS) end)
 	end
 
 	--[[
-	ALWAYS attempt the restore, whatever happened above -- and retry it.
+	RESTORE THE SOUND -- unless nobody can vouch for what the filter is doing.
 
-	Every other failure here is recoverable by the user: a wrong filter can be
-	adjusted, a bypassed filter still passes audio. Being left MUTED is the one
-	outcome with no obvious cause and no obvious remedy -- the Radio simply goes
-	silent and nothing on screen says why. It is worth three attempts.
+	This used to restore unconditionally, on the reasoning that being left MUTED
+	is the one outcome with no obvious cause and no obvious remedy. That reasoning
+	still holds for every case where the hardware state is KNOWN, and it is why
+	the restore is retried three times.
+
+	It does not hold when the coefficient write failed AND the recovery bypass
+	could not be confirmed. Then the chip may be running a partial coefficient
+	set, whose numerator no longer cancels its own denominator -- the +42 dB
+	resonance measured on 2026-08-01. Unmuting into that is not a recovery, it is
+	the worst available outcome, and it reaches the user's ears and the driver.
+
+	So: silence is preferred to a filter nobody can vouch for, and the caller is
+	told (stillMuted) so it can SAY SO on screen. Silence with an explanation is
+	a different thing from silence with no cause -- and the explanation is what
+	the original reasoning was actually missing.
 	]]
+	local mustStayMuted = (not okWrite) and (not safeBypassed)
+
 	local okRestore = false
-	for _ = 1, 3 do
-		okRestore = pcall(function() bsp:setMixer(M.MUTE_CTL, restore, restore) end)
-		if okRestore then break end
+	if not mustStayMuted then
+		for _ = 1, 3 do
+			okRestore = pcall(function() bsp:setMixer(M.MUTE_CTL, restore, restore) end)
+			if okRestore then break end
+		end
 	end
 
 	if not okWrite then
 		return { ok = false, writes = 0, error = tostring(n),
-		         hardwareStateUnknown = true, restored = okRestore }
+		         safeBypassed = safeBypassed,
+		         hardwareStateUnknown = not safeBypassed,
+		         stillMuted = mustStayMuted or (not okRestore),
+		         restored = okRestore }
 	end
 	if not okRestore then
 		-- Wrote fine but the device is still muted: report it so the caller can

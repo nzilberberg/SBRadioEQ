@@ -489,19 +489,51 @@ function _applyNow(self)
 		self.written = { c1 = self.c1, c2 = self.c2 }
 		self.writtenBypass = bypass
 		self.hwError = nil
+		self.hwMuted = false
 		self:_levelMatch(target)
-		return
+		return res
 	end
 
 	-- Failure. Do NOT raise the volume, and do not claim to know the chip's state.
 	self.written = nil
 	self.writtenBypass = nil
 	self.hwError = (res and res.error) or "hardware write failed"
+	self.hwMuted = (res and res.stillMuted) or false
+
+	--[[
+	⛔ REFUSING TO RAISE THE VOLUME IS ONLY HALF OF IT. UNWIND WHAT IS ALREADY IN.
+
+	Not calling _levelMatch on failure stops NEW make-up going in, and that was
+	correct as far as it went. But the make-up from the PREVIOUS curve is already
+	folded into the player volume, and the failure path has very likely just
+	dropped the filter -- applyBSPDiff bypasses before it writes, and the recovery
+	bypasses again. So the attenuation is gone while its compensation, up to about
+	27 dB of it, is still there. That is the loud-audio bug this project already
+	shipped once, arriving by a different road.
+
+	The worst instance is Reset Tone: it flattens the curve, and if the write
+	fails it would store flat settings, log success, and leave the volume high
+	over a flat curve -- while being the very action documented as the safe thing
+	to do before uninstalling.
+
+	CONDITION: only when the bypass was CONFIRMED. Unwinding means lowering the
+	volume by the make-up, which is right when the cut is definitely gone and
+	merely quiet when it is not -- but "merely quiet" is still the wrong answer to
+	give confidently, and where the state is unknown applyBSPMuted has kept the
+	output muted anyway. So: confirmed-bypassed unwinds; unknown stays silent and
+	says so.
+	]]
+	if res and res.safeBypassed then
+		self:_levelMatch(0)
+	end
+
 	log:warn("SBEQ-HWFAIL ", self.hwError,
 	         " unknownState=", tostring(res and res.hardwareStateUnknown),
 	         " safeBypassed=", tostring(res and res.safeBypassed),
 	         " stillMuted=", tostring(res and res.stillMuted),
+	         " unwound=", tostring((res and res.safeBypassed) or false),
 	         " build=", BUILD)
+	return res or { ok = false, error = self.hwError }
 end
 
 -- NO DEBOUNCE. A 260 ms delay was tried to reduce how often the bypass window is
@@ -509,7 +541,7 @@ end
 -- the dial seem dead while being turned. Live feedback wins; the artifact gets
 -- fixed at its source instead.
 function _flushApply(self)
-	self:_applyNow()
+	return self:_applyNow()
 end
 
 ------------------------------------------------------------------- drawing
@@ -608,7 +640,13 @@ function _redraw(self, srf)
 	much further it can go. When a step has just been refused, say so plainly --
 	otherwise a dead-feeling knob reads as the bug the last one actually was.
 	]]
-	if self.limited then
+	-- A hardware failure outranks the make-up readout: see the note in
+	-- _redrawTone. The graph below still draws the REQUESTED curve, so without
+	-- this the screen actively asserts a filter that is not running.
+	if self.hwError then
+		textRight(srf, self.fontS, C_WARN,
+		          self.hwMuted and "MUTED" or "EQ FAILED", readoutRight, 11)
+	elseif self.limited then
 		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", readoutRight, 11)
 	elseif not on then
 		textRight(srf, self.fontS, C_DIM, "BYP", readoutRight, 11)
@@ -871,7 +909,19 @@ function _redrawTone(self, srf)
 	-- Bypass takes the corner when it is on. It has to be VISIBLE, not implied:
 	-- bypassed with a big boost still showing on the faders would otherwise look
 	-- like the filter is simply not working.
-	if not s.enabled then
+	--[[
+	⛔ A HARDWARE FAILURE OUTRANKS EVERY OTHER READOUT, so it is tested first.
+
+	self.hwError was set and logged and read by NOTHING -- the user got silence or
+	a wrong-sounding EQ and no indication at all, while the graph and the faders
+	carried on showing the curve that had been REQUESTED. Those are three
+	different things (desired, last applied, actual), and showing only the first
+	while the third has failed is what made the failure invisible.
+	]]
+	if self.hwError then
+		textRight(srf, self.fontS, C_WARN,
+		          self.hwMuted and "MUTED" or "EQ FAILED", readoutRight, 11)
+	elseif not s.enabled then
 		textRight(srf, self.fontS, C_WARN, "BYPASS", readoutRight, 11)
 	elseif self.limited then
 		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", readoutRight, 11)
