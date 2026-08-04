@@ -38,7 +38,11 @@ APPLET="$HERE/applet/SBRadioEQApplet.lua"
 # ⛔ REFUSE TO PASS VACUOUSLY. If _applyNow is renamed or restructured, a
 # scan-for-a-pattern gate finds nothing and reports clean about a file it did not
 # understand. An empty extraction is a harness failure, never a verdict.
-body=$(awk '/^function _applyNow\(self\)/{f=1} f{print} f&&/^end$/{exit}' "$APPLET")
+# Match on the NAME, not the full parameter list: this aborted (correctly, but
+# needlessly) the moment `allowShell` was added as a second parameter. A gate
+# keyed to a signature reports "cannot find it" for every ordinary refactor,
+# which is the kind of noise that gets a gate switched off.
+body=$(awk '/^function _applyNow\(self/{f=1} f{print} f&&/^end$/{exit}' "$APPLET")
 [ -n "$body" ] || {
 	echo "FAIL(2): could not extract _applyNow from the applet."
 	echo "         The function was renamed or reshaped -- this gate must not"

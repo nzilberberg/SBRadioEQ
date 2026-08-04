@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 45
+local BUILD = 47
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -478,7 +478,7 @@ function _levelMatch(self, target)
 	         appliedAtten = s.appliedAtten }
 end
 
-function _applyNow(self)
+function _applyNow(self, allowShell)
 	local s = self:getSettings()
 	local bypass = (not s.enabled) or (s.bassGain == 0 and s.trebGain == 0)
 
@@ -534,12 +534,34 @@ function _applyNow(self)
 		return (levelRes and levelRes.ok) and true or false
 	end
 
+	--[[
+	⛔ THE SHELL PATH IS BOOT-ONLY. IT HAS NO MUTE BRACKET.
+
+	A.apply bypasses the filter as its first amixer command and takes about a
+	second to run. There is no PCM mute around it, because the mute lives in the
+	BSP path -- so if make-up gain is currently folded into the player volume, that
+	whole second plays UNATTENUATED audio at the compensated level. Up to 34.41 dB
+	of it. That is the same loud state the ordering fix exists to prevent, just
+	reached through the fallback instead.
+
+	Every interactive route already refuses to open without baby_bsp (both editors
+	and the Tone menu that carries the checkboxes and Reset), so in practice only
+	the boot service reaches this. `allowShell` makes that explicit rather than
+	incidental: a future caller that loses the baby_bsp guard fails closed with a
+	message instead of quietly taking the loud path.
+
+	Boot is the one place it is the right trade: nothing is playing yet, and a
+	silent failure to restore the curve would be worse than a slow write.
+	]]
 	local res
 	if self.bsp then
 		res = A.applyBSPMuted(self.bsp, self.c1, self.c2, self.written, bypass,
 		                      self.writtenBypass, reconcile)
-	else
+	elseif allowShell then
 		res = A.apply(self.c1, self.c2, bypass)
+	else
+		res = { ok = false, error = "no baby_bsp; refusing the unmuted shell path",
+		        hardwareStateUnknown = false, refused = true }
 	end
 
 	if res and res.ok then
@@ -611,8 +633,8 @@ end
 -- heard, and it was the wrong trade: it stole the live feel of the control, making
 -- the dial seem dead while being turned. Live feedback wins; the artifact gets
 -- fixed at its source instead.
-function _flushApply(self)
-	return self:_applyNow()
+function _flushApply(self, allowShell)
+	return self:_applyNow(allowShell)
 end
 
 ------------------------------------------------------------------- drawing
@@ -1163,8 +1185,9 @@ function menuShow(self, menuItem)
 			function(_, isSelected)
 				local s = self:getSettings()
 				s.enabled = isSelected and true or false
-				self:_flushApply()
+				local res = self:_flushApply()
 				self:storeSettings()
+				self:_reportApply(res, "Tone Control")
 			end,
 			self:getSettings().enabled and true or false),
 	})
@@ -1308,8 +1331,9 @@ function levelMatchShow(self, menuItem)
 					self.bsp = okbsp and bsp or nil
 				end
 				self:_design()
-				self:_applyNow()
+				local res = self:_applyNow()
 				self:storeSettings()
+				self:_reportApply(res, "Level Matching")
 			end,
 			self:getSettings().levelMatch ~= false),
 	})
@@ -1395,6 +1419,31 @@ because the remedy differs and "it failed" alone leaves them guessing:
                the LOUD one, and the one where saying nothing is worst
   otherwise    the write failed; the previous curve is still in the chip
 ]]
+--[[
+Report a failed apply from a context that has no canvas of its own.
+
+The two editors paint EQ FAILED / MUTED in their status corner, so a failure
+during an edit is visible where it happens. A CHECKBOX in Settings > Audio
+Settings > Tone Controls has no canvas, and the window-close path has no screen
+left at all -- so without this, those actions fail exactly the way Reset Tone
+used to: the setting saves, the menu returns, and nothing says the hardware
+refused it.
+
+Returns true when the apply succeeded, so a caller can also decline to close.
+]]
+function _reportApply(self, res, title)
+	if res and res.ok then return true end
+	log:warn("SBEQ-APPLYFAIL from=", tostring(title),
+	         " err=", tostring(res and res.error),
+	         " stillMuted=", tostring(res and res.stillMuted),
+	         " unwound=", tostring(self.hwUnwound), " build=", BUILD)
+	local Textarea = require("jive.ui.Textarea")
+	local w = Window("text_list", title or "Equalizer", 'settingstitle')
+	w:addWidget(Textarea("text", self:_resetFailureText(res)))
+	self:tieAndShowWindow(w)
+	return false
+end
+
 function _resetFailureText(self, res)
 	if res and res.stillMuted then
 		return "The equaliser could not be set safely, so sound is muted.\n\n" ..
@@ -1545,8 +1594,9 @@ function toneShow(self, menuItem)
 			else
 				self.toneEditing = false
 				self.snap        = nil
-				self:_flushApply()
+				local res = self:_flushApply()
 				self:storeSettings()
+				self:_reportApply(res, "Equalizer")
 			end
 			repaint()
 			return EVENT_CONSUME
@@ -1575,8 +1625,9 @@ function toneShow(self, menuItem)
 			self.snap        = nil
 			self.toneEditing = false
 			self:_design()
-			self:_applyNow()
+			local res = self:_applyNow()
 			self:storeSettings()
+			self:_reportApply(res, "Equalizer")
 			repaint()
 			return EVENT_CONSUME
 		end
@@ -1595,8 +1646,9 @@ function toneShow(self, menuItem)
 		if event:getKeycode() == KEY_GO then
 			local s = self:getSettings()
 			s.enabled = not s.enabled
-			self:_flushApply()
+			local res = self:_flushApply()
 			self:storeSettings()
+			self:_reportApply(res, "Equalizer")
 			repaint()
 			return EVENT_CONSUME
 		end
@@ -1770,8 +1822,9 @@ function settingsShow(self, menuItem)
 				-- Leaving EDIT by accepting.
 				self.editing = false
 				self.snap = nil
-				self:_flushApply()
+				local res = self:_flushApply()
 				self:storeSettings()
+				self:_reportApply(res, "Equalizer")
 			end
 			repaint(self)
 			return EVENT_CONSUME
@@ -1825,8 +1878,9 @@ function settingsShow(self, menuItem)
 			self.snap    = nil
 			self.editing = false
 			self:_design()
-			self:_flushApply()
+			local res = self:_flushApply()
 			self:storeSettings()
+			self:_reportApply(res, "Equalizer")
 			repaint(self)
 			return EVENT_CONSUME
 		end
@@ -1837,8 +1891,9 @@ function settingsShow(self, menuItem)
 		if event:getKeycode() == KEY_GO then
 			local s = self:getSettings()
 			s.enabled = not s.enabled
-			self:_flushApply()
+			local res = self:_flushApply()
 			self:storeSettings()
+			self:_reportApply(res, "Equalizer")
 			repaint(self)
 			return EVENT_CONSUME
 		end
@@ -1846,8 +1901,9 @@ function settingsShow(self, menuItem)
 	end)
 
 	window:addListener(EVENT_WINDOW_POP, function()
-		self:_flushApply()
+		local res = self:_flushApply()
 		self:storeSettings()
+		self:_reportApply(res, "Equalizer")
 	end)
 
 	self:tieAndShowWindow(window)
@@ -1871,5 +1927,5 @@ function sbRadioEQApply(self)
 	A.forgetMutePoint()
 	A.mutePoint()
 	self:_design()
-	self:_applyNow()
+	self:_applyNow(true)
 end
