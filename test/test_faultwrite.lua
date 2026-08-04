@@ -15,7 +15,7 @@ were guarded by tests that could not have caught them:
 2. The shell path ended `M.execute(cmd); return cmd` -- discarding the exit
    status and returning a string, which is always truthy. The applet then
    advanced its cache and called _levelMatch(), which RAISES THE PLAYER VOLUME to
-   compensate for attenuation that may not exist. Up to 27 dB of make-up over
+   compensate for attenuation that may not exist. Up to 34 dB of make-up over
    unattenuated audio.
 
 So this file's stubs THROW. A stub that cannot fail cannot test failure handling,

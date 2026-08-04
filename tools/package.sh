@@ -116,8 +116,29 @@ done
 nested=$(echo "$listing" | grep '/' || true)
 [ -z "$nested" ] || { echo "FAIL: archive contains directories: $nested"; exit 1; }
 
-SHA1=$(sha1sum "$DIST/$ZIPNAME" | cut -d' ' -f1)
-SHA256=$(sha256sum "$DIST/$ZIPNAME" | cut -d' ' -f1)
+# ⛔ SAME CLASS AS THE ZIP LISTING ABOVE, MISSED WHEN THAT ONE WAS FIXED.
+# sha1sum/sha256sum are GNU coreutils names. macOS ships `shasum`, and some
+# minimal images have only openssl. The listing tool was made to pick from what
+# exists and these two lines, four lines away, were left hardcoded -- a sweep
+# that stopped at the first instance of its own class.
+digest() {                                   # $1 = 1|256, $2 = file
+	if command -v "sha$1sum" >/dev/null 2>&1; then
+		"sha$1sum" "$2" | cut -d' ' -f1
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a "$1" "$2" | cut -d' ' -f1
+	elif command -v openssl >/dev/null 2>&1; then
+		openssl dgst "-sha$1" "$2" | sed 's/.*= *//'
+	fi
+}
+
+SHA1=$(digest 1 "$DIST/$ZIPNAME")
+SHA256=$(digest 256 "$DIST/$ZIPNAME")
+# An empty hash must never reach repo.xml: the installer would compare against
+# nothing and every install would fail its integrity check.
+[ -n "$SHA1" ] && [ -n "$SHA256" ] || {
+	echo "FAIL: no sha1sum/sha256sum, shasum or openssl -- cannot hash the archive"
+	exit 2
+}
 
 # ---- where the archive will live -----------------------------------------
 #

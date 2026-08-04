@@ -32,6 +32,19 @@ fail=0
 bad() { echo "  FAIL  $1"; fail=$((fail + 1)); }
 ok()  { echo "  ok    $1"; }
 
+# Same tool-availability rule as package.sh: GNU coreutils names first, then
+# macOS `shasum`, then openssl. See the note there -- these two call sites were
+# missed when the zip-listing portability was fixed in the same file.
+digest() {                                   # $1 = 1|256, $2 = file
+	if command -v "sha$1sum" >/dev/null 2>&1; then
+		"sha$1sum" "$2" | cut -d' ' -f1
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a "$1" "$2" | cut -d' ' -f1
+	elif command -v openssl >/dev/null 2>&1; then
+		openssl dgst "-sha$1" "$2" | sed 's/.*= *//'
+	fi
+}
+
 if [ "$MODE" = "--local" ]; then
 	SRC="$HERE/dist"
 	[ -f "$SRC/$ZIPNAME" ] || { echo "FAIL: no $SRC/$ZIPNAME -- run package.sh first"; exit 2; }
@@ -56,7 +69,7 @@ fi
 [ -f "$TMP/repo.xml" ] || { echo "FAIL: repo.xml missing"; exit 1; }
 
 # --- the check that matters: does repo.xml describe THIS archive? ---------
-ACTUAL=$(sha1sum "$TMP/$ZIPNAME" | cut -d' ' -f1)
+ACTUAL=$(digest 1 "$TMP/$ZIPNAME")
 CLAIMED=$(grep -o '<sha>[^<]*' "$TMP/repo.xml" | sed 's/<sha>//')
 
 if [ -z "$CLAIMED" ]; then
@@ -73,7 +86,7 @@ fi
 # --- the published SHA-256, if present ------------------------------------
 if [ -f "$TMP/SHA256SUMS" ]; then
 	want=$(cut -d' ' -f1 "$TMP/SHA256SUMS")
-	got=$(sha256sum "$TMP/$ZIPNAME" | cut -d' ' -f1)
+	got=$(digest 256 "$TMP/$ZIPNAME")
 	if [ "$want" = "$got" ]; then ok "SHA256SUMS matches the archive"
 	else bad "SHA256SUMS does not match the archive"; fi
 fi

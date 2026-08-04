@@ -64,8 +64,12 @@ fixture "missing unwind is caught" 1 \
 
 # B -- the unwind's CONDITION. Unwinding unconditionally is a guess, not a fix:
 # it lowers the volume against a filter that may still be applying its cut.
+# NOTE: this mutation must track the real guard's text. It silently stopped
+# matching once `and not res.reconciled` was added to that line, and the fixture
+# then proved nothing while still reporting a pass -- caught only because the
+# gate's own suite was re-run after the change.
 fixture "unconditional unwind is caught" 1 \
-	"sed -i 's/if res and res\.safeBypassed then/if true then/' $APPLET
+	"sed -i 's/if res and res\.safeBypassed and not res\.reconciled then/if true then/' $APPLET
 	 sed -i 's/\" safeBypassed=\", tostring(res and res\.safeBypassed),//' $APPLET"
 
 # C -- callers must be able to tell applied from failed.

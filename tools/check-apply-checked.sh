@@ -20,7 +20,7 @@
 #   B. A failure must be UNWOUND.   Refusing to add NEW make-up is half the job.
 #      The previous curve's make-up is already in the player volume, and the
 #      failure path has very likely dropped the filter -- so the attenuation is
-#      gone and up to ~27 dB of compensation is not. The unwind must be
+#      gone and up to ~34 dB of compensation is not. The unwind must be
 #      conditional on the bypass being CONFIRMED, not merely attempted.
 #
 #   C. The result must be RETURNABLE.  _applyNow returned nothing in both
@@ -126,6 +126,30 @@ else
 	echo "      Its last statement is:$laststmt"
 	echo "      A caller cannot distinguish that from a successful apply."
 	bad=$((bad + 1))
+fi
+
+# --- D. Reset Tone must not announce a reset that did not happen -----------
+#
+# Reset Tone is the documented pre-uninstall action. It used to call _applyNow,
+# discard the result, store the flat settings, and log SBEQ-RESET success
+# unconditionally -- so the one action that makes the device safe to remove could
+# fail silently and report itself done. The success log must be conditional.
+reset=$(awk '/^function resetToDefaults\(self\)/{f=1} f{print} f&&/^end$/{exit}' "$APPLET")
+[ -n "$reset" ] || {
+	echo "FAIL(2): could not extract resetToDefaults -- gate cannot verify it"
+	exit 2
+}
+if echo "$reset" | grep -q 'SBEQ-RESET to defaults'; then
+	if echo "$reset" | grep -qE '^[[:space:]]*if .*\bok\b.*then'; then
+		echo "  ok   Reset Tone announces success only on a checked result"
+	else
+		echo "FAIL: resetToDefaults logs SBEQ-RESET success unconditionally."
+		echo "      The pre-uninstall action can then fail while telling the user"
+		echo "      it succeeded, leaving make-up gain in the player volume."
+		bad=$((bad + 1))
+	fi
+else
+	echo "  ok   Reset Tone does not emit an unconditional success log"
 fi
 
 echo ""

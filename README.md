@@ -66,7 +66,7 @@ are volatile, the reboot clears the EQ completely — no tone modification survi
 
 **One thing does survive: the player volume.** See *Level matching* below. Run **Tone Controls →
 Reset Tone** before uninstalling and the make-up gain is wound back out; skip it and playback stays
-as much as ~27 dB louder than the curve warranted, until you turn it down by hand.
+as much as ~34 dB louder than the curve warranted, until you turn it down by hand.
 
 ---
 
@@ -74,7 +74,8 @@ as much as ~27 dB louder than the curve warranted, until you turn it down by han
 
 The codec cannot express gain above unity, so a "+12 dB bass" is realised as 0 dB bass and −12 dB
 everywhere else, and the level is bought back by raising the *player's* volume. That make-up is
-what "Level Matching" controls, and at full two-band boost it reaches about 27 dB.
+what "Level Matching" controls. Measured on the device at the default corner frequencies: **15 dB**
+with one band at +15, **30 dB** with both at +15 and Q 1.0, and **34.4 dB** at both +15 with Q 2.0.
 
 Two consequences worth knowing:
 
@@ -86,10 +87,15 @@ Two consequences worth knowing:
 If a boost would need more make-up than the current volume can pay for, the applet refuses it and
 the header shows the shortfall rather than letting the output sag.
 
-**When a hardware write fails**, the applet does not raise the volume and records the failure to
-syslog (`SBEQ-HWFAIL`). It is not yet reported on screen, and a failure during Reset Tone can leave
-make-up in the player volume with a flat curve until the next successful apply. Both are being
-fixed; until then, syslog is where the evidence is.
+**When a hardware write fails**, the applet does not raise the volume, shows `EQ FAILED` or `MUTED`
+in the status corner of either editor, and records the detail to syslog (`SBEQ-HWFAIL`). If the
+filter was confirmed bypassed, the make-up already in the player volume is wound back out before
+sound returns; if the hardware state cannot be established, the output stays muted rather than
+unmuting into a filter nobody can vouch for. Reset Tone shows the reason on screen instead of
+closing when it cannot complete.
+
+The volume move happens *inside* the mute, so the filter and the volume always settle together —
+audio is never restored partway through a change.
 
 ---
 
@@ -175,8 +181,8 @@ graph shows it honestly rather than hiding it.
 
 ## Status
 
-Working and in daily use. Released as v0.2.0; installable from the catalog URL above. Not listed in
-the central LMS plugin repository — that would be a pull request to
+Working and in daily use. Latest release v0.2.1; installable from the catalog URL above. Not listed
+in the central LMS plugin repository — that would be a pull request to
 `lms-community/lms-plugin-repository`, and it has not been made.
 
 **Settings do survive a power cycle.** The codec's registers are volatile, so the applet re-applies
@@ -185,9 +191,12 @@ screen never opened.
 
 Known gaps, in the order they matter:
 
-- A failed hardware write is not surfaced on screen, and every save path persists the requested
-  curve as though it had been applied. During Reset Tone that can leave make-up gain over a flat
-  curve until the next successful apply.
+- Failures reach the two editor screens and Reset Tone, but **not yet** the Tone Control and Level
+  Matching checkboxes, the editor accept/hold/close paths, or the window-close save. Those still
+  persist the requested curve without reporting that it was not applied.
+- The **shell fallback** (used only when `baby_bsp` is missing) has no PCM mute bracket, so with
+  make-up active it can expose bypassed audio at the compensated volume for about a second. The
+  interactive editors already refuse to open without `baby_bsp`; the boot path still uses it.
 - The endpoint-change case is untested: `SqueezeboxBabyApplet` rewrites codec state on headphone
   insert and on power transitions, which will silently drop the filter.
 - Reset Tone and Level Matching are structurally tested but have never been watched through by a

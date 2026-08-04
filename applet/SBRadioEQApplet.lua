@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 43
+local BUILD = 45
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -439,17 +439,43 @@ function _levelMatch(self, target)
 	-- syslog I/O belongs on the knob path no more than a process spawn does.
 	-- It did its job -- the level-matching fault it was chasing is recorded in
 	-- the project notes.
+	--[[
+	⛔ EVERY EXIT REPORTS. THIS FUNCTION USED TO HAVE THREE BARE `return`s.
+
+	A caller could not tell "the volume is now where it should be" from "there is
+	no local player, so nothing moved at all". That distinction is the whole
+	safety question on a DOWNWARD move: if the make-up could not be taken out, the
+	output must not be unmuted, because unmuting plays the old make-up over an
+	attenuation that has already gone.
+
+	Two of the three exits are genuine successes -- a delta inside the deadband and
+	a delta that quantises to the same volume setting both mean "already correct".
+	Only a missing player or volume is a failure. They were indistinguishable
+	before because all three returned nothing.
+	]]
 	delta = U.levelDelta(target, applied)
-	if not delta then return end
-	if not player or not cur then return end
+	if not delta then
+		return { ok = true, noop = true, reason = "within deadband",
+		         appliedAtten = applied }
+	end
+	if not player or not cur then
+		return { ok = false, error = "no local player or volume",
+		         requestedDelta = delta, appliedAtten = applied }
+	end
 
 	local fromDb = D.volumeToDb(cur)
 	local newVol = D.dbToVolume(fromDb + delta)
-	if newVol == cur then return end
+	if newVol == cur then
+		return { ok = true, noop = true, reason = "quantises to the same volume",
+		         requestedDelta = delta, appliedAtten = applied }
+	end
 	player:volume(newVol, true)
 
 	-- Record what was ACHIEVED, not what was asked for.
 	s.appliedAtten = U.levelAchieved(applied, fromDb, D.volumeToDb(newVol))
+	return { ok = true, requestedDelta = delta,
+	         achievedDelta = D.volumeToDb(newVol) - fromDb,
+	         appliedAtten = s.appliedAtten }
 end
 
 function _applyNow(self)
@@ -465,7 +491,7 @@ function _applyNow(self)
 
 	This used to apply, then unconditionally advance the cache and call
 	_levelMatch(). _levelMatch RAISES THE PLAYER VOLUME to compensate for
-	attenuation the filter is supposed to be applying -- up to 27 dB at full
+	attenuation the filter is supposed to be applying -- up to 34 dB at full
 	two-band boost. If the write silently failed there was no attenuation to
 	compensate for, so the volume went up over unattenuated audio.
 
@@ -478,9 +504,40 @@ function _applyNow(self)
 	must write the full set rather than diff against coefficients that may not be
 	in the chip.
 	]]
+	--[[
+	⛔ THE VOLUME MOVE HAPPENS INSIDE THE MUTE, VIA THIS CALLBACK.
+
+	It used to happen after applyBSPMuted returned -- i.e. after the output had
+	already been unmuted -- so every DOWNWARD transition briefly played
+	unattenuated audio at the old, compensated volume. Reset Tone, bypassing,
+	reducing a boost and cancelling an edit all take that path, not just failures.
+
+	The callback answers one question: may the output be unmuted? A downward move
+	that did not actually happen must answer NO.
+	]]
+	local levelRes = nil
+	local function reconcile(hw)
+		local t
+		if hw.ok then
+			t = target                    -- the curve went in; pay for it
+		else
+			t = 0                         -- confirmed bypassed; owe nothing
+		end
+		local appliedBefore = (self:getSettings().appliedAtten or 0)
+		local downward      = t < appliedBefore
+
+		levelRes = self:_levelMatch(t)
+
+		-- Upward or unchanged: unmuting is safe whatever happened, because the
+		-- error can only be that the output is too QUIET.
+		if not downward then return true end
+		return (levelRes and levelRes.ok) and true or false
+	end
+
 	local res
 	if self.bsp then
-		res = A.applyBSPMuted(self.bsp, self.c1, self.c2, self.written, bypass, self.writtenBypass)
+		res = A.applyBSPMuted(self.bsp, self.c1, self.c2, self.written, bypass,
+		                      self.writtenBypass, reconcile)
 	else
 		res = A.apply(self.c1, self.c2, bypass)
 	end
@@ -490,7 +547,10 @@ function _applyNow(self)
 		self.writtenBypass = bypass
 		self.hwError = nil
 		self.hwMuted = false
-		self:_levelMatch(target)
+		-- Only when the muted path did not already do it: the no-op early returns
+		-- and the shell fallback never take the callback. Calling twice would
+		-- compute a second delta against an appliedAtten the first call moved.
+		if not (res.reconciled) then self:_levelMatch(target) end
 		return res
 	end
 
@@ -508,7 +568,7 @@ function _applyNow(self)
 	folded into the player volume, and the failure path has very likely just
 	dropped the filter -- applyBSPDiff bypasses before it writes, and the recovery
 	bypasses again. So the attenuation is gone while its compensation, up to about
-	27 dB of it, is still there. That is the loud-audio bug this project already
+	34 dB of it, is still there. That is the loud-audio bug this project already
 	shipped once, arriving by a different road.
 
 	The worst instance is Reset Tone: it flattens the curve, and if the write
@@ -523,15 +583,26 @@ function _applyNow(self)
 	output muted anyway. So: confirmed-bypassed unwinds; unknown stays silent and
 	says so.
 	]]
-	if res and res.safeBypassed then
-		self:_levelMatch(0)
+	if res and res.safeBypassed and not res.reconciled then
+		levelRes = self:_levelMatch(0)
 	end
+
+	--[[
+	⛔ `unwound=` USED TO BE LOGGED FROM safeBypassed, WHICH IS A DIFFERENT FACT.
+	It said the unwind had happened whenever the BYPASS was confirmed, even when
+	_levelMatch had silently done nothing -- no local player, no volume reading.
+	It now reports what _levelMatch actually returned, and its reason.
+	]]
+	local unwound = (levelRes and levelRes.ok) and true or false
+	self.hwUnwound = unwound
 
 	log:warn("SBEQ-HWFAIL ", self.hwError,
 	         " unknownState=", tostring(res and res.hardwareStateUnknown),
 	         " safeBypassed=", tostring(res and res.safeBypassed),
 	         " stillMuted=", tostring(res and res.stillMuted),
-	         " unwound=", tostring((res and res.safeBypassed) or false),
+	         " reconciled=", tostring(res and res.reconciled),
+	         " unwound=", tostring(unwound),
+	         " why=", tostring(levelRes and (levelRes.error or levelRes.reason or "moved")),
 	         " build=", BUILD)
 	return res or { ok = false, error = self.hwError }
 end
@@ -1256,7 +1327,14 @@ loud-audio bug, not a cosmetic one.
 
 appliedAtten is bookkeeping about the PLAYER VOLUME: it records how much make-up
 gain is currently folded into it. At the moment Reset runs, the volume is still
-carrying the old boost's make-up -- up to 15 dB of it.
+carrying the old boost's make-up.
+
+⛔ THE FIGURE HERE USED TO SAY 15 dB AND THAT IS THE SINGLE-BAND NUMBER.
+Measured on the device (diag_maxmakeup, defaults 150 Hz / 3 kHz): one band at
++15 needs 15.00 dB, BOTH bands at +15 need 30.00 dB at Q 1.0, and 34.41 dB at
+Q 2.0. So this comment understated the worst case by more than half, and the
+"27 dB" written elsewhere in this project understated it too -- 27 was never
+measured, it was carried from one comment to the next.
 
 Copy appliedAtten = 0 in with the rest and _levelMatch computes
 delta = target(0) - applied(0) = 0, decides there is nothing to do, and leaves
@@ -1279,9 +1357,56 @@ function resetToDefaults(self)
 	end
 
 	self:_design()
-	self:_applyNow()          -- brings the volume back down; see above
+	local res = self:_applyNow()      -- brings the volume back down; see above
 	self:storeSettings()
-	log:info("SBEQ-RESET to defaults, build=", BUILD)
+
+	--[[
+	⛔ DO NOT ANNOUNCE A RESET THAT DID NOT HAPPEN.
+
+	This used to log SBEQ-RESET unconditionally, immediately after an _applyNow
+	whose result it discarded, and the confirmation screen closed either way. So
+	the one action documented as the safe thing to do before uninstalling could
+	fail, save flat settings, report success, and return the user to the menu with
+	the old make-up still in the player volume and nothing said.
+
+	Storing the settings is still right -- they are the DESIRED state, and the
+	next successful apply reconciles from them. What must not happen is claiming
+	the reset succeeded.
+	]]
+	local ok = (res and res.ok) and true or false
+	if ok then
+		log:info("SBEQ-RESET to defaults, build=", BUILD)
+	else
+		log:warn("SBEQ-RESET FAILED err=", tostring(res and res.error),
+		         " stillMuted=", tostring(res and res.stillMuted),
+		         " unwound=", tostring(self.hwUnwound),
+		         " appliedAtten=", tostring(self:getSettings().appliedAtten),
+		         " build=", BUILD)
+	end
+	return res
+end
+
+--[[
+What the user is told when a reset does not complete. Three different states,
+because the remedy differs and "it failed" alone leaves them guessing:
+
+  muted        the filter cannot be vouched for, so audio is off deliberately
+  not unwound  the EQ is off but the make-up is still in the player volume --
+               the LOUD one, and the one where saying nothing is worst
+  otherwise    the write failed; the previous curve is still in the chip
+]]
+function _resetFailureText(self, res)
+	if res and res.stillMuted then
+		return "The equaliser could not be set safely, so sound is muted.\n\n" ..
+		       "Restart the Radio to restore audio."
+	end
+	if not self.hwUnwound then
+		return "The equaliser was switched off, but the volume compensation " ..
+		       "could not be removed.\n\nThe Radio may be louder than usual -- " ..
+		       "turn the volume down before uninstalling."
+	end
+	return "The equaliser could not be reset.\n\nIts previous settings are " ..
+	       "still active."
 end
 
 --[[
@@ -1306,8 +1431,22 @@ function resetShow(self, menuItem)
 			text     = self:string("SBRADIOEQ_RESET_CONTINUE"),
 			sound    = "WINDOWSHOW",
 			callback = function()
-				self:resetToDefaults()
-				window:hide()
+				local res = self:resetToDefaults()
+				if res and res.ok then
+					window:hide()
+					return
+				end
+				--[[
+				⛔ DO NOT HIDE ON FAILURE. Hiding returns the user to the menu with
+				no indication, which is exactly how the pre-uninstall action could
+				report itself done while make-up gain was still in the volume.
+				The screen is REPLACED by the explanation, so the failure cannot be
+				missed by anyone who does not later open one of the editors.
+				]]
+				local Textarea = require("jive.ui.Textarea")
+				local w = Window("text_list", "Reset Tone", 'settingstitle')
+				w:addWidget(Textarea("text", self:_resetFailureText(res)))
+				self:tieAndShowWindow(w)
 			end,
 		},
 	})

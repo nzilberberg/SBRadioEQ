@@ -151,7 +151,7 @@ Shell fallback. Returns a RESULT, not the command string.
 returning a string, which is always truthy. A caller could not tell a successful
 write from a failed one, and the applet's level compensation ran regardless. Since
 a boost is realised as cut plus volume make-up, a silently failed write meant the
-volume went UP by as much as 27 dB with no attenuation underneath it. That is a
+volume went UP by as much as 34 dB with no attenuation underneath it. That is a
 safety defect, not an error-handling nicety.
 
 os.execute returns the exit status in this Lua; 0 is success.
@@ -385,7 +385,7 @@ function M.forgetMutePoint()
 	mutePoint = nil
 end
 
-function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
+function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass, reconcile)
 	-- Nothing to do? Then do not mute -- a dip for no reason is still a dip.
 	if not bypass then
 		local anything = false
@@ -488,8 +488,42 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
 	]]
 	local mustStayMuted = (not okWrite) and (not safeBypassed)
 
+	--[[
+	⛔⛔ THE VOLUME IS RECONCILED HERE, WHILE STILL MUTED. THIS IS THE ORDERING.
+
+	The caller's level compensation and this function's mute used to be two
+	separate operations, and the sequence was:
+
+	    hardware attenuation removed  ->  UNMUTED  ->  volume brought down
+
+	Between the second and third step, unattenuated audio played at a volume
+	still carrying the old make-up -- measured at up to 34.41 dB of it. The window
+	is short, but it is a definite ordering, not a race, and it happens on EVERY
+	downward transition, not only on failures: Reset Tone, bypassing, reducing a
+	boost, and cancelling an edit back to a smaller curve all take it.
+
+	Muting already brackets the coefficient write, so the fix is to widen what the
+	mute covers rather than to add anything: reconcile inside the bracket, and
+	unmute only once BOTH the filter and the volume are where they belong.
+
+	`reconcile` is a callback so this module stays free of the applet's settings
+	and player, and so a test can record hardware writes and the volume move in
+	ONE sequence -- which is the only way to assert an ordering at all. It is told
+	the hardware outcome, and answers one question: may the output be unmuted?
+	A downward move that did not happen must answer no, because unmuting then is
+	exactly the loud state above.
+	]]
+	local reconciled, mayUnmute = false, true
+	if reconcile and not mustStayMuted then
+		local okRec, verdict = pcall(reconcile, { ok = okWrite, safeBypassed = safeBypassed })
+		reconciled = okRec
+		mayUnmute  = okRec and (verdict and true or false)
+	end
+
+	local holdMute = mustStayMuted or (not mayUnmute)
+
 	local okRestore = false
-	if not mustStayMuted then
+	if not holdMute then
 		for _ = 1, 3 do
 			okRestore = pcall(function() bsp:setMixer(M.MUTE_CTL, restore, restore) end)
 			if okRestore then break end
@@ -499,9 +533,18 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
 	if not okWrite then
 		return { ok = false, writes = 0, error = tostring(n),
 		         safeBypassed = safeBypassed,
+		         reconciled = reconciled,
 		         hardwareStateUnknown = not safeBypassed,
-		         stillMuted = mustStayMuted or (not okRestore),
+		         stillMuted = holdMute or (not okRestore),
 		         restored = okRestore }
+	end
+	if holdMute then
+		-- The filter went in correctly, but the volume could not be brought down
+		-- to match it. Unmuting would play the old make-up over the new, smaller
+		-- attenuation. Stay silent and say so.
+		return { ok = false, writes = n, error = "volume not reconciled",
+		         reconciled = reconciled, stillMuted = true,
+		         hardwareStateUnknown = false }
 	end
 	if not okRestore then
 		-- Wrote fine but the device is still muted: report it so the caller can
@@ -509,7 +552,11 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass)
 		return { ok = false, writes = n, error = "mute was not restored",
 		         stillMuted = true, hardwareStateUnknown = false }
 	end
-	return { ok = true, writes = n }
+	-- `reconciled` must be reported on the SUCCESS path too, not only on failures:
+	-- _applyNow uses it to decide whether the volume still needs moving, so a nil
+	-- here makes it run the reconciliation a SECOND time, computing a fresh delta
+	-- against an appliedAtten the first pass already moved.
+	return { ok = true, writes = n, reconciled = reconciled }
 end
 
 function M.applyBSP(bsp, c1, c2, bypass)
