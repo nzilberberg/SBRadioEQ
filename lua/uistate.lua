@@ -125,10 +125,32 @@ function M.headroomDb(appliedAtten, volumeDb)
 	return (appliedAtten or 0) - (volumeDb or 0)
 end
 
--- Can a curve costing attenDb be paid for out of budget? The tolerance absorbs
--- the last fractional dB so a step is not refused for a rounding hair.
-function M.affordable(attenDb, budget)
-	return (attenDb or 0) <= (budget or 0) + 0.01
+--[[
+⛔ M.affordable WAS REMOVED 2026-08-04, AND SO WAS THE POLICY IT SERVED.
+
+It answered "can this curve be paid for?", and the applet used the answer to
+REFUSE an edit -- first only a gain increase, later any change that raised the
+curve's cost. That treated Level Matching as a constraint on which EQ curves the
+user may create, and that is the wrong product.
+
+THE CONTRACT NOW: the EQ controls define the requested sound. Level Matching
+applies as much make-up as the player-volume range permits. When full
+compensation is impossible the EQ is still fully applied, and playback is simply
+quieter by the uncompensated amount. Insufficient make-up fails in the QUIET
+direction, so there was never a safety reason to deny the curve.
+
+What replaces it is a measurement, not a verdict: how much of the required
+make-up cannot be delivered. That figure drives a display marker and nothing
+else -- no revert, no refusal, no popup.
+
+⚠️ This does NOT relax anything in the other direction. A DOWNWARD
+reconciliation that fails still keeps the output muted, because stale make-up
+over reduced attenuation is the loud state.
+]]
+function M.shortfallDb(requiredDb, budgetDb)
+	local short = (requiredDb or 0) - (budgetDb or 0)
+	if short < 0 then return 0 end
+	return short
 end
 
 --[[
@@ -148,11 +170,11 @@ Worse, the suite ASSERTED the hole: test_headroom carried "frequency is never
 checked" and "Q is never checked" as passing expectations, so the defect had a
 test defending it.
 
-The replacement lives in the applet's _design, which compares the DESIGNED
-attenDb of the candidate curve against the budget -- the quantity the guard
-actually protects, rather than a proxy for it. It covers any parameter, present
-or future, that changes what the curve costs. M.affordable above is still the
-comparison; only the decision about WHEN to apply it moved.
+⛔ AND THEN THE WHOLE POLICY WENT. Generalising the guard to Q and frequency was
+the wrong direction: the guard itself was the mistake. Level Matching is a
+best-effort service, not a constraint on which curves may be built. Nothing
+refuses an edit now; M.shortfallDb measures what cannot be delivered and the UI
+marks it LIMITED.
 ]]
 
 --[[

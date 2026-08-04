@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 50
+local BUILD = 52
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -288,36 +288,22 @@ end for the user. An earlier verified-Q-clamp proposal was priced at 620 ms-3.3 
 per click and rejected on exactly this ground; this stays at one.
 ]]
 function _design(self)
-	local s         = self:getSettings()
-	local prevAtten = self.attenDb or 0
-	local edit      = self._edit
-	self._edit      = nil
-
+	local s = self:getSettings()
 	local c1, c2, i = designFrom(s)
-
-	if edit and s.levelMatch then
-		local newAtten = i.attenDb or 0
-		-- Only a curve that costs MORE can be unaffordable. A change that is
-		-- level or cheaper must always be allowed, or the user is trapped at a
-		-- setting with no way back down.
-		if newAtten > prevAtten + 0.05
-		   and not U.affordable(newAtten, self:_headroomDb()) then
-			s[edit.key]  = edit.before
-			self.limited = true
-			c1, c2, i    = designFrom(s)          -- rejected steps only
-			self.c1, self.c2 = c1, c2
-			self.realised1, self.realised2 = i.realised1, i.realised2
-			self.attenDb = i.attenDb or 0
-			self:_check(i.diag)
-			self:_recomputeCurve()
-			return
-		end
-		self.limited = false
-	end
 
 	self.c1, self.c2 = c1, c2
 	self.realised1, self.realised2 = i.realised1, i.realised2
 	self.attenDb = i.attenDb or 0
+
+	--[[
+	`limited` means COMPENSATION IS PARTIAL. It does NOT mean an edit was refused,
+	and it used to. Nothing here reverts anything: the requested curve is designed
+	and applied, level matching gives what the volume range allows, and any
+	remainder is simply heard as a quieter result.
+	]]
+	self.shortfallDb = U.shortfallDb(self.attenDb, self:_headroomDb())
+	self.limited     = s.levelMatch and self.shortfallDb > 0.05
+
 	self:_check(i.diag)
 	self:_recomputeCurve()
 end
@@ -797,7 +783,8 @@ end
 
 -- Right-aligned, for the title bar readout whose width changes with its value.
 -- Font:width was verified present on the device (diag_gfx): 92 px for
--- "NO HEADROOM" at FreeSans 12.
+-- "NO HEADROOM" at FreeSans 12 (the marker is "LIMITED" now; the width
+-- check is what mattered).
 local function textRight(srf, font, colour, str, xRight, y)
 	text(srf, font, colour, str, xRight - font:width(str), y)
 end
@@ -878,9 +865,10 @@ function _redraw(self, srf)
 
 	--[[
 	Report the make-up against what is left to pay it with, not on its own. "-27"
-	means nothing by itself; "-27/32" says the boost is affordable and roughly how
-	much further it can go. When a step has just been refused, say so plainly --
-	otherwise a dead-feeling knob reads as the bug the last one actually was.
+	means nothing by itself; "-34/20" says the curve wants 34 dB and 20 is available,
+	so the difference is being heard as a quieter result. LIMITED marks that state.
+	Nothing is refused -- the readout describes the compensation, not a verdict on
+	the edit.
 	]]
 	-- A hardware failure outranks the make-up readout: see the note in
 	-- _redrawTone. The graph below still draws the REQUESTED curve, so without
@@ -889,7 +877,7 @@ function _redraw(self, srf)
 		textRight(srf, self.fontS, C_WARN,
 		          self.hwMuted and "MUTED" or "EQ FAILED", readoutRight, 11)
 	elseif self.limited then
-		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", readoutRight, 11)
+		textRight(srf, self.fontS, C_WARN, "LIMITED", readoutRight, 11)
 	elseif not on then
 		textRight(srf, self.fontS, C_DIM, "BYP", readoutRight, 11)
 	elseif s.levelMatch and self.attenDb and self.attenDb > 0.05 then
@@ -1008,10 +996,9 @@ end
 -- setting, which is what the Tone screen needs -- it has no cell grid, just bass
 -- and treble gain.
 --
--- Deliberately one implementation. The affordability rule below is the whole
--- reason a boost can be refused, and a second copy of it on the Tone screen
--- would be a copy that drifts: the two screens edit the SAME bassGain and
--- trebGain, so they must refuse the same steps for the same reasons.
+-- Deliberately one implementation. The two screens edit the SAME bassGain and
+-- trebGain, so a second copy of the step logic would be a copy that drifts --
+-- they must move the same values by the same rules.
 function _nudge(self, delta)
 	return self:_nudgeKey(CELLS[self.cell].key, delta)
 end
@@ -1035,26 +1022,33 @@ function _nudgeKey(self, key, delta)
 	music just gets quieter, which is what the user reported as boosting a second
 	band killing the volume.
 
-	So refuse the step that cannot be paid for, and let the UI say why. Clamping
-	the visible control is the honest form of this: a limit you can see beats a
-	curve that is silently rewritten, and beats a level that silently sags.
+	⛔⛔ THIS USED TO REFUSE THE STEP, AND THAT WAS THE WRONG PRODUCT.
 
-	Only boosts are checked -- a cut never demands make-up, and must always remain
-	available as the way OUT of a limited state.
+	The old reasoning was "a limit you can see beats a level that silently sags",
+	so an edit whose curve cost more than the remaining volume range was reverted
+	and the header said NO HEADROOM. That made Level Matching a constraint on
+	which EQ curves the user is allowed to build -- a compensation service
+	deciding what sound you may ask for.
+
+	It also made the controls behave inconsistently: the guard first covered only
+	gain increases, so Q and frequency edits changed the cost and passed. That
+	inconsistency was fixed by generalising the guard, which was the wrong
+	direction -- the guard itself is what had to go.
+
+	THE CONTRACT NOW: the EQ controls define the requested sound. Level Matching
+	applies as much make-up as the volume range permits, and any remainder is
+	heard as a quieter result. Nothing is reverted, for any control. Running out
+	of make-up fails in the QUIET direction, so there is no safety argument for
+	denying the curve -- and the honest signal is the required/available readout
+	plus a LIMITED marker, not a control that stops responding.
+
+	⚠️ Unchanged: everything about the DOWNWARD direction. Reducing or bypassing
+	attenuation while stale make-up is still in the volume is the loud state, and
+	that is still resolved inside the mute before anything becomes audible.
 	]]
-	local before = s[key]
 	s[key] = v
-	--[[
-	The affordability clamp exists ONLY because make-up comes out of the volume
-	control, and volume runs out at full scale. With level matching off nothing
-	is being paid for, so there is nothing to run out of -- refusing a boost
-	then would be a limit with no cause behind it, and it would trap the user at
-	a setting for a reason that no longer applies.
-	]]
-	-- Hand the edit to _design, which decides affordability from the CURVE's cost
-	-- rather than from which control moved. It reverts this key if the candidate
-	-- costs more than the budget allows. See the note above _design.
-	self._edit = { key = key, before = before }
+	-- The edit stands. _design applies whatever was asked for; Level Matching
+	-- then gives what the volume range allows and tolerates any remainder.
 end
 
 --[[
@@ -1095,8 +1089,9 @@ rather than "cut". So the track is centre-zero with a needle, drawn here.
 The +15 end of the fader is a CONTROL range, not a promise. The chip cannot
 express gain above 0 dB, so a boost is realised as cut-elsewhere plus make-up
 volume, and the make-up runs out -- see _nudgeKey. Because this screen goes
-through the same clamp, a step that cannot be paid for is refused here exactly
-as it is on the EQ screen, and self.limited says so on screen.
+through the same path, a curve costing more than the volume range can give is
+still APPLIED here exactly as on the EQ screen; self.limited marks the partial
+compensation. No step is refused on either screen.
 ]]
 
 local TONE_ROWS = {
@@ -1158,11 +1153,11 @@ function _redrawTone(self, srf)
 	elseif not s.enabled then
 		textRight(srf, self.fontS, C_WARN, "BYPASS", readoutRight, 11)
 	elseif self.limited then
-		textRight(srf, self.fontS, C_WARN, "NO HEADROOM", readoutRight, 11)
+		textRight(srf, self.fontS, C_WARN, "LIMITED", readoutRight, 11)
 	elseif s.levelMatch and self.attenDb and self.attenDb > 0.05 then
-		-- same figure the EQ screen shows, same corner, and gated the same way:
-		-- two screens editing one value must not disagree about what is
-		-- affordable, nor about whether affordability applies at all
+		-- same figure the EQ screen shows, same corner, gated the same way: two
+		-- screens editing one value must not disagree about how much make-up is
+		-- wanted, nor about whether level matching applies at all
 		textRight(srf, self.fontS, C_LABEL,
 		          string.format("-%.0f/%.0f", self.attenDb, self:_headroomDb()),
 		          readoutRight, 11)
@@ -1435,12 +1430,10 @@ list them is that missing one leaves a feature half-off rather than off:
 
   1. _levelMatch          the volume move itself -- forced to target 0 when off,
                           so switching off UNWINDS existing make-up
-  2. _nudgeKey            the affordability clamp, which exists only because
-                          make-up is paid for out of the volume control
-  3. _redraw              the EQ screen's "-14/82" readout
+  2. _design              the shortfall figure and the LIMITED marker -- a
+                          MEASUREMENT of partial compensation, never a refusal
+  3. _redraw              the EQ screen's "-34/20" readout
   4. _redrawTone          the Tone screen's copy of the same readout
-  5. settingsShow's Back  the cancel-restores-volume path
-  6. toneShow's Back      the same path on the other screen
 
 The default is ON. Off is a deliberate choice, not the starting point: without
 matching, turning the bass up makes the music quieter, which is exactly what the

@@ -47,8 +47,18 @@ digest() {                                   # $1 = 1|256, $2 = file
 
 if [ "$MODE" = "--local" ]; then
 	SRC="$HERE/dist"
-	[ -f "$SRC/$ZIPNAME" ] || { echo "FAIL: no $SRC/$ZIPNAME -- run package.sh first"; exit 2; }
-	cp "$SRC/$ZIPNAME" "$SRC/repo.xml" "$SRC/SHA256SUMS" "$TMP/" 2>/dev/null || true
+	# ⛔ REQUIRE EVERY ARTIFACT LOCALLY, NOT JUST THE ARCHIVE. The copy used to be
+	# `2>/dev/null || true` and the SHA-256 comparison was wrapped in `if [ -f ]`,
+	# so a dist/ missing SHA256SUMS passed local verification and then had to be
+	# published without it -- the file the published check treats as mandatory.
+	# Optional-if-present is how a pre-flight check passes for the wrong reason.
+	for f in "$ZIPNAME" repo.xml SHA256SUMS; do
+		[ -f "$SRC/$f" ] || {
+			echo "FAIL: missing local release artifact $f -- run package.sh first"
+			exit 2
+		}
+	done
+	cp "$SRC/$ZIPNAME" "$SRC/repo.xml" "$SRC/SHA256SUMS" "$TMP/"
 	echo "checking LOCAL dist/ for $VERSION"
 else
 	BASE="https://github.com/nzilberberg/SBRadioEQ/releases/download/v$VERSION"
@@ -83,8 +93,12 @@ else
 	ok "repo.xml's SHA-1 matches the archive ($ACTUAL)"
 fi
 
-# --- the published SHA-256, if present ------------------------------------
-if [ -f "$TMP/SHA256SUMS" ]; then
+# --- the published SHA-256 -------------------------------------------------
+# Not optional. Its absence is itself a finding: the file is published for manual
+# verification, and "not present so not checked" is indistinguishable from "fine".
+if [ ! -f "$TMP/SHA256SUMS" ]; then
+	bad "SHA256SUMS is missing -- there is nothing to verify the archive against by hand"
+else
 	want=$(cut -d' ' -f1 "$TMP/SHA256SUMS")
 	got=$(digest 256 "$TMP/$ZIPNAME")
 	if [ "$want" = "$got" ]; then ok "SHA256SUMS matches the archive"

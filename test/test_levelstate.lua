@@ -200,5 +200,49 @@ do
 	   string.format("applied %.3f, volume %d", st.applied, st.volume))
 end
 
+
+--[[
+BEST-EFFORT LEVEL MATCHING -- switching it ON against a curve it cannot fully pay for.
+
+The feature must not refuse, must not switch itself back off, and must not need a
+toggle cycle to recover. It applies what the volume range allows, records what it
+actually ACHIEVED (not what was asked), and catches up on its own when the curve
+becomes cheaper. The separate rule -- that an EDIT may not newly exceed the
+headroom -- lives in the applet's _design and is covered by test_headroom.
+
+The distinction that makes this safe: appliedAtten is bookkeeping about the REAL
+volume. If only part of the make-up went in, recording the full figure would
+claim attenuation that is not being compensated, and every later delta would be
+computed from that lie.
+]]
+print("=== enabling level matching on an unaffordable curve is BEST EFFORT ===")
+do
+	local st = newState(90)                  -- only a few dB of room above
+	local CURVE = 30.0                       -- both bands +15 at Q 1.0, measured
+
+	levelMatch(st, CURVE)
+
+	ok("the volume moved as far as it could", st.volume > 90,
+	   string.format("90 -> %d", st.volume))
+	ok("it did not overshoot the top", st.volume <= 100, tostring(st.volume))
+	ok("appliedAtten records what was ACHIEVED, not what was asked",
+	   st.applied < CURVE and st.applied > 0,
+	   string.format("achieved %.2f of %.1f dB", st.applied, CURVE))
+	ok("the books still agree with the real volume", drift(st) < 0.01,
+	   string.format("drift %.3f", drift(st)))
+
+	-- Now the user makes the curve cheaper. No toggle, no retry: the next apply
+	-- reconciles from what is really in place toward the new, affordable target.
+	local before = st.applied
+	levelMatch(st, 2.0)
+
+	ok("a curve cheap enough to afford reconciles automatically", st.applied < before,
+	   string.format("%.2f -> %.2f dB", before, st.applied))
+	ok("and lands on the new target", math.abs(st.applied - 2.0) < 1.5,
+	   string.format("applied %.2f, target 2.0", st.applied))
+	ok("the books agree after recovery", drift(st) < 0.01,
+	   string.format("drift %.3f", drift(st)))
+end
+
 print("")
 print(string.format("passed=%d failed=%d", pass, fail))

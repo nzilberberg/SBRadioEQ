@@ -178,6 +178,25 @@ local function run(cmd)
 	return true, nil
 end
 
+--[[
+Silence the PCM the way the BSP path does, but through amixer.
+
+⛔ THE SHELL PATH USED TO HAVE NO MUTE AT ALL, and that was defended with "it
+only runs at boot, and nothing is playing at boot". That is an assumption about
+SqueezePlay's startup, not a property of this code -- and the whole chain takes
+about a second, led by a BYPASS. If a saved curve's make-up is already in the
+player volume when it runs, that second is unattenuated audio at the compensated
+level, up to 34.41 dB of it. The same exposure the BSP bracket exists to prevent,
+excused by a claim nobody measured.
+
+The control is the same one (numid 1); only the transport differs. Two extra
+process spawns on a path that already costs ~1 s, on boot only.
+]]
+local function pcmCommand(v)
+	return string.format("%s -c %d cset numid=%d %d,%d >/dev/null 2>&1",
+	                     M.AMIXER, M.CARD, M.NUMID.pcmVolume, v, v)
+end
+
 function M.apply(c1, c2, bypass)
 	local cmd
 	if bypass then
@@ -186,8 +205,32 @@ function M.apply(c1, c2, bypass)
 		cmd = M.buildCommand(c1, c2, M.ENABLE_BOTH)
 	end
 
+	-- Mute around the write. If the mute itself fails, carry on rather than
+	-- refuse: an unmuted apply is the old behaviour, and refusing would leave the
+	-- saved curve unapplied at every boot on a device whose mixer is misbehaving.
+	local restore = M.mutePoint()
+	local muted   = run(pcmCommand(0))
+
 	local ok, err = run(cmd)
-	if ok then return { ok = true, cmd = cmd } end
+
+	--[[
+	Restore before returning, on EVERY path, and retry as the BSP path does.
+	Being left silent with no cause is the one failure a user cannot diagnose.
+	]]
+	local function unmute()
+		if not muted then return true end
+		for _ = 1, 3 do
+			if run(pcmCommand(restore)) then return true end
+		end
+		return false
+	end
+
+	if ok then
+		local restored = unmute()
+		return { ok = restored, cmd = cmd, muted = muted,
+		         stillMuted = not restored,
+		         error = (not restored) and "mute was not restored" or nil }
+	end
 
 	--[[
 	The chain aborted. Because it is `&&`-joined and led by the bypass, the
@@ -198,8 +241,16 @@ function M.apply(c1, c2, bypass)
 	the first is safe to unwind level compensation against, the second is not.
 	]]
 	local safe = run(M.bypassCommand())
+
+	-- Same rule as the BSP path: do not restore sound over a filter nobody can
+	-- vouch for. A confirmed bypass is safe to unmute into; an unconfirmed one
+	-- may be a partially written coefficient set.
+	local restored = false
+	if safe then restored = unmute() end
+
 	return { ok = false, cmd = cmd, error = err,
-	         safeBypassed = safe, hardwareStateUnknown = not safe }
+	         safeBypassed = safe, hardwareStateUnknown = not safe,
+	         muted = muted, stillMuted = (not safe) or (not restored) }
 end
 
 --[[

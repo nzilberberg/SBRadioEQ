@@ -101,22 +101,52 @@ fi
 echo ""
 echo "decisions derived from the make-up are gated too:"
 
-# ⛔ THE CLAMP IS NOW COST-BASED, AND THIS CHECK HAD TO CHANGE WITH IT.
+#[[ ⛔⛔ THIS CHECK ONCE REQUIRED THE VERY THING IT NOW FORBIDS.
 #
-# It used to look for `s.levelMatch and U.mustCheckAffordability(...)`. That
-# helper decided whether to check from WHICH CONTROL MOVED -- gain only -- so Q
-# and frequency edits skipped the guard although Q changes what the curve costs
-# (30.00 dB at Q 1.0 vs 34.41 dB at Q 2.0, measured). The helper is gone.
+# It began by demanding `s.levelMatch and U.mustCheckAffordability(...)`, then was
+# rewritten to demand a cost-based `U.affordable(...)` clamp. Both versions
+# enforced a policy that turned out to be the wrong product: Level Matching is a
+# best-effort COMPENSATION SERVICE, not a constraint on which EQ curves a user may
+# build. Refusing an edit because the volume cannot fully pay for it fails in the
+# QUIET direction, so there was never a safety case for it.
 #
-# Two things must hold now: the affordability comparison is still gated on
-# levelMatch, and it is fed by a DESIGNED cost rather than a field-type test.
-aff=$(printf '%s\n' "$code" | grep -c 'U\.affordable(' || true)
-affg=$(printf '%s\n' "$code" | grep -c 'and s\.levelMatch then\|if s\.levelMatch' || true)
-if [ "$aff" -gt 0 ] && [ "$affg" -gt 0 ]; then
-	echo "  ok    the affordability clamp is gated on levelMatch ($aff comparison(s))"
+# THE CONTRACT: no valid EQ edit may be reverted solely because full upward
+# compensation is unavailable. That is checkable -- a revert means writing a
+# previous value back into the settings table from the design or nudge path.
+#
+# A gate that enforced the old rule for two releases is exactly why this one
+# states the contract in the comment: the next person to read it should be able
+# to tell whether the rule still matches the product.
+#]]
+if printf '%s\n' "$codeNC" | grep -qE 'U\.affordable\(|mustCheckAffordability'; then
+	echo "  FAIL  an affordability helper is back -- Level Matching must not decide"
+	echo "        which curves the user may build. It compensates as far as the"
+	echo "        volume allows and tolerates the remainder."
+	fail=1
 else
-	echo "  FAIL  the affordability clamp is missing or not gated ($aff, gate $affg)"
-	echo "        with matching off nothing is paid for, so nothing can run out"
+	echo "  ok    no affordability helper decides whether an edit is allowed"
+fi
+
+# _design designs the requested curve. If it WRITES to the settings table it is
+# putting an edit back, which is the rejection policy returning by another name.
+dbody=$(printf '%s\n' "$codeNC" | awk '/^function _design\(self\)/{f=1} f{print} f&&/^end$/{exit}')
+if [ -z "$dbody" ]; then
+	echo "  FAIL  could not read _design -- this gate must not report clean blind"
+	fail=1
+elif printf '%s\n' "$dbody" | grep -qE '^[[:space:]]*s\[[^]]*\][[:space:]]*='; then
+	echo "  FAIL  _design assigns into the settings table -- a reverted edit."
+	echo "        The requested curve must be designed and applied as asked."
+	fail=1
+else
+	echo "  ok    _design never writes settings back (no edit is reverted)"
+fi
+
+# The shortfall must still be MEASURED, or the LIMITED marker is decorative.
+if printf '%s\n' "$codeNC" | grep -q 'U\.shortfallDb('; then
+	echo "  ok    the uncompensated amount is measured and shown"
+else
+	echo "  FAIL  nothing measures the shortfall -- partial compensation would be"
+	echo "        invisible, which is the sag the old policy existed to prevent."
 	fail=1
 fi
 

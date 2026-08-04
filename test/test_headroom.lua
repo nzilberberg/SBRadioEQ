@@ -90,49 +90,79 @@ do
 	ok("raising Q with the gains unchanged costs MORE make-up", atQ2 > atQ1 + 1,
 	   string.format("Q1.0 = %.2f dB -> Q2.0 = %.2f dB (+%.2f)", atQ1, atQ2, atQ2 - atQ1))
 
-	-- The exact case the old guard waved through: budget sized for the Q 1.0
-	-- curve, then Q raised. Affordability must say no.
-	ok("a Q rise beyond the budget is NOT affordable",
-	   not U.affordable(atQ2, atQ1),
-	   string.format("needs %.2f dB, budget %.2f dB", atQ2, atQ1))
+	-- Raising Q costs more. Under the CURRENT contract that is a shortfall to be
+	-- reported, not a step to be refused.
+	ok("the extra cost is reported as a shortfall, not a refusal",
+	   U.shortfallDb(atQ2, atQ1) > 1,
+	   string.format("%.2f dB of the %.2f dB cannot be delivered",
+	                 U.shortfallDb(atQ2, atQ1), atQ2))
 
-	ok("the same curve is affordable against its own cost",
-	   U.affordable(atQ1, atQ1), "a step must never be refused at its own price")
+	ok("a curve within budget has no shortfall",
+	   U.shortfallDb(atQ1, atQ1) == 0, "nothing is owed at its own price")
 
-	-- A cut must always remain available or the user is trapped.
 	local cheaper = costOf(0.7, 0.7)
-	ok("lowering Q is always affordable once the dearer curve was",
-	   cheaper < atQ2 and U.affordable(cheaper, atQ2),
+	ok("a cheaper curve clears the shortfall",
+	   cheaper < atQ2 and U.shortfallDb(cheaper, atQ2) == 0,
 	   string.format("%.2f dB against a %.2f dB budget", cheaper, atQ2))
 end
 
-print("=== a boost that cannot be paid for is refused ===")
+--[[
+⛔⛔ THE REJECTION POLICY IS GONE. THIS IS THE REGRESSION GUARD.
+
+Level Matching used to REFUSE an EQ edit whose curve cost more than the volume
+range could pay for -- first gains only, then, after that inconsistency was
+"fixed", any control. Both were wrong: it made a compensation service into a
+constraint on which sounds the user may ask for, and it fails in the QUIET
+direction, so no safety argument supported it.
+
+The contract now: the EQ controls define the requested sound. Level Matching
+gives what the volume allows, and the remainder is heard as a quieter result.
+
+These assertions fail if either helper comes back, which is the shape the
+regression would take.
+]]
+print("=== no helper exists that can refuse an edit ===")
 do
+	ok("M.affordable is gone", U.affordable == nil,
+	   "a yes/no verdict on a curve has no place in the contract")
+	ok("M.mustCheckAffordability is gone", U.mustCheckAffordability == nil,
+	   "and neither does a field-type test for when to apply one")
+	ok("what replaced them MEASURES instead", type(U.shortfallDb) == "function",
+	   "shortfallDb reports the uncompensated amount")
+end
+
+print("=== an expensive curve is costed, never denied ===")
+do
+	-- The case the old policy refused outright: a strong boost at a high base
+	-- volume. It is now simply partially compensated.
 	local need = atten(15, 0)
-	ok("bass +15 at volume 90 is unaffordable",
-	   not U.affordable(need, budgetAt(90, 0)),
-	   string.format("needs %.1f of %.1f dB", need, budgetAt(90, 0)))
-	ok("the same boost at volume 30 is affordable",
-	   U.affordable(need, budgetAt(30, 0)),
+	local tight = budgetAt(90, 0)
+	ok("a +15 bass at volume 90 reports a shortfall",
+	   U.shortfallDb(need, tight) > 0,
+	   string.format("needs %.1f, has %.1f, short %.1f dB",
+	                 need, tight, U.shortfallDb(need, tight)))
+	ok("the same boost lower down needs nothing",
+	   U.shortfallDb(need, budgetAt(30, 0)) == 0,
 	   string.format("needs %.1f of %.1f dB", need, budgetAt(30, 0)))
 end
 
-print("=== the SECOND band is what hits the ceiling ===")
+print("=== the SECOND band is what eats the remaining room ===")
 do
 	local vol  = 65
 	local one  = atten(12, 0)
 	local both = atten(12, 12)
-	ok("bass +12 alone is affordable", U.affordable(one, budgetAt(vol, 0)),
+	ok("bass +12 alone fits", U.shortfallDb(one, budgetAt(vol, 0)) == 0,
 	   string.format("needs %.1f of %.1f dB", one, budgetAt(vol, 0)))
-	ok("treble +12 on top is refused rather than sagging",
-	   not U.affordable(both, budgetAt(vol, 0)),
-	   string.format("would need %.1f of %.1f dB", both, budgetAt(vol, 0)))
+	ok("treble +12 on top is applied and the shortfall is reported",
+	   U.shortfallDb(both, budgetAt(vol, 0)) > 0,
+	   string.format("wants %.1f of %.1f dB -- the rest is heard as quieter",
+	                 both, budgetAt(vol, 0)))
 
 	-- Derived, not hardcoded: an earlier version pinned volume 55 and a later
-	-- design change made the pair cost more, so a correct clamp failed a stale test.
+	-- design change made the pair cost more, so a stale test failed correct code.
 	local roomy = D.dbToVolume(-(both + 3))
-	ok("the same pair is allowed once there is room",
-	   U.affordable(both, budgetAt(roomy, 0)),
+	ok("the same pair is fully compensated once there is room",
+	   U.shortfallDb(both, budgetAt(roomy, 0)) == 0,
 	   string.format("needs %.1f of %.1f dB at volume %d", both, budgetAt(roomy, 0), roomy))
 end
 
@@ -231,14 +261,16 @@ end
 print("=== with no player, do not clamp on a guess ===")
 do
 	--[[
-	_headroomDb returns 96 dB when the volume is unreadable. Refusing edits
-	because of that would make the control appear broken for a reason the user
-	cannot see or act on, so the fallback must be permissive.
+	_headroomDb returns 96 dB when the volume is unreadable. Nothing refuses an
+	edit any more, so this no longer guards a clamp -- but a permissive fallback
+	still matters for the READOUT: a fabricated small budget would show LIMITED
+	and a shortfall that does not exist, for a reason the user cannot see or act
+	on. Reporting a fault that is not happening is its own defect.
 	]]
 	local NO_PLAYER = 96
 	local worst = atten(15, 15)
-	ok("the biggest possible demand clears the fallback budget",
-	   U.affordable(worst, NO_PLAYER),
+	ok("the biggest possible demand shows no shortfall against the fallback",
+	   U.shortfallDb(worst, NO_PLAYER) == 0,
 	   string.format("worst case %.1f dB vs %.0f dB", worst, NO_PLAYER))
 end
 

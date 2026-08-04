@@ -7,7 +7,12 @@ It drives the TLV320AIC3104 codec's hardware "audio effects filter" directly, so
 costs no CPU, applies in realtime, and works with no server involved. Adjust it with the Radio's
 own knob and buttons — no web UI, no remote, no LMS plugin.
 
-The Radio has bass and treble controls in its menus but no real EQ. This adds one.
+The Radio has **no tone controls at all** — not bass, not treble, not an EQ. LMS hides them because
+`Slim::Player::SqueezePlay` inherits a zero-width bass range from `Squeezebox2.pm`, so every UI gates
+the control off; and the device's own Audio Settings menu contains only Sound Effects. (The Boom is
+different — it has real tone hardware driven over I²C. The Radio does not.)
+
+The hardware to do it has been sitting in the codec the whole time, unused. This reaches it.
 
 ---
 
@@ -19,8 +24,8 @@ The Radio has bass and treble controls in its menus but no real EQ. This adds on
   is what the chip is doing rather than an idealised version of it.
 - **Automatic level compensation.** The codec cannot express gain above unity, so every boost is
   realised as a cut elsewhere and the level is bought back with the player's volume. The applet
-  works out how much and applies it, and refuses a boost it cannot pay for rather than letting the
-  output sag.
+  works out how much and applies as much as the volume range allows — it never refuses an EQ
+  setting, and any part it cannot compensate is simply heard as a quieter result.
 - **The device's own look** — the stock wallpaper and skin chrome, so it does not look bolted on.
 
 Controls are knob-only, because the Radio's arrows are remote-only:
@@ -84,8 +89,24 @@ Two consequences worth knowing:
 - The make-up lives in the player volume, which persists independently of this applet — hence the
   removal note above.
 
-If a boost would need more make-up than the current volume can pay for, the applet refuses it and
-the header shows the shortfall rather than letting the output sag.
+**Level Matching is best-effort, and never limits what you can build.** The EQ controls define the
+sound you are asking for. Level Matching raises the player volume to offset the attenuation that
+curve requires; if the current volume range cannot provide the whole amount, the curve is still
+applied in full and playback is simply quieter by the uncompensated part. It stays enabled and
+recalculates on every change, so a later, cheaper curve reduces or clears the shortfall on its own —
+no toggling off and on, no manual retry.
+
+Measured example: from volume 90, a curve wanting 30 dB gets 4.93 dB and the volume stops at 100. A
+2.0 dB curve later reconciles to 1.97 dB.
+
+What governs the maximum is your **current volume**, not the EQ settings:
+
+- Strong boosts, high Q, and overlapping bands all cost more make-up.
+- Lowering your base listening level before dialling in an expensive curve leaves more room.
+- A shortfall is a loudness limitation, never a limit on which EQ settings are valid.
+
+The readout shows required against available (`-34/20`), and a small `LIMITED` marker appears while
+compensation is partial. Neither blocks editing.
 
 **When a hardware write fails**, the applet does not raise the volume, shows `EQ FAILED` or `MUTED`
 in the status corner of either editor, and records the detail to syslog (`SBEQ-HWFAIL`). If the
@@ -188,6 +209,28 @@ in the central LMS plugin repository — that would be a pull request to
 **Settings do survive a power cycle.** The codec's registers are volatile, so the applet re-applies
 the saved curve at startup from its Meta (`configureApplet`), verified on a cold boot with the
 screen never opened.
+
+### Tested configuration
+
+Everything below was measured on the hardware, not inferred. Nothing outside this row has been
+tested, which is why the catalog entry carries **no `minTarget`/`maxTarget` bounds** — asserting a
+firmware range nobody has checked is worse than leaving it open.
+
+| | |
+|---|---|
+| Model | Squeezebox Radio (`baby`) — Logitech MX25 Baby Board |
+| Firmware | **9.0.1 r17084** (community, Yocto `root@poky`, 2025-12-28) |
+| Kernel | 2.6.26.8-rt16 |
+| `baby_bsp` | present, 13076 bytes, at `/usr/lib/lua/5.1/baby_bsp.so` |
+| Install / update | LMS 9.x via the stable catalog URL above |
+| Boot re-apply | verified on a cold boot with the screen never opened |
+| Restart | verified; codec coefficients survive a SqueezePlay restart |
+| LMS power off → on | verified: enable register and both coefficient sets byte-identical |
+| Speaker ↔ headphones | **NOT TESTED** — see below |
+
+⚠️ **Only one firmware has ever been tested.** `baby_bsp` is present on it, and every interactive
+path fails closed without that module, but "every Radio firmware ships it" is not something this
+project has established.
 
 Known gaps, in the order they matter:
 
