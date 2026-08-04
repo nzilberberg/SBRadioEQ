@@ -83,7 +83,32 @@ Ordering matters: TI warns that partially-updated coefficients can momentarily
 describe an unstable filter, so the filter is bypassed BEFORE the writes and
 re-enabled after. The codec soft-mutes across the change in hardware
 (datasheet 10.3.4.4), so this is click-free.
+
+⛔ THE COMMANDS ARE JOINED WITH `&&`, NOT `;`. This is a safety property, not a
+style preference.
+
+`;` runs every command regardless of what the one before it did, and os.execute
+reports only the LAST command's status. So an intermediate coefficient write
+could fail, the chain would carry on, the final ENABLE would succeed, and the
+whole operation reported success -- having just enabled the filter over a
+partially written coefficient set. That is the +42 dB resonance of 2026-08-01,
+reached by the one path that also tells the caller everything went well, which
+then lets level compensation raise the volume on top of it.
+
+`&&` makes the chain abort at the first failure, and because the BYPASS is the
+first command, every abort point leaves the hardware in a safe state:
+
+  fails at the bypass      nothing was written; the old filter still runs
+  fails at a coefficient   the filter is bypassed; the partial set is not live
+  fails at the re-enable   the filter is bypassed with a complete set loaded
+
+None of those is audible as a fault, and all of them report non-zero.
 ]]
+function M.bypassCommand()
+	return string.format("%s -c %d cset numid=%d %d,%d >/dev/null 2>&1",
+	                     M.AMIXER, M.CARD, M.NUMID.enable, M.BYPASS, M.BYPASS)
+end
+
 function M.buildCommand(c1, c2, enable)
 	local parts = {}
 	local function cset(numid, v)
@@ -91,7 +116,7 @@ function M.buildCommand(c1, c2, enable)
 		                                  M.AMIXER, M.CARD, numid, v, v)
 	end
 
-	cset(M.NUMID.enable, M.BYPASS)          -- quiet the filter while it changes
+	parts[1] = M.bypassCommand()            -- quiet the filter while it changes
 
 	if c1 then
 		for _, k in ipairs(ORDER) do cset(M.NUMID.band1[k], unsigned(c1[k])) end
@@ -104,7 +129,7 @@ function M.buildCommand(c1, c2, enable)
 
 	-- One os.execute, not twelve: a process spawn costs far more than the write
 	-- itself on a 360 MHz core.
-	return table.concat(parts, "; ")
+	return table.concat(parts, " && ")
 end
 
 function M.execute(cmd)
@@ -130,25 +155,51 @@ volume went UP by as much as 27 dB with no attenuation underneath it. That is a
 safety defect, not an error-handling nicety.
 
 os.execute returns the exit status in this Lua; 0 is success.
+
+⛔ THE RECOVERY BYPASS IS A SEPARATE PROCESS, AND ITS RESULT IS CHECKED.
+
+The obvious way to report which failure happened is a distinct exit code from the
+shell (`... || { bypass && exit 2; exit 3; }`). That was rejected: Lua 5.1's
+os.execute returns whatever C `system()` gives it, and whether that arrives here
+as the exit code or as the raw wait status (exit << 8) is a PLATFORM question
+nobody has measured on this device. A recovery path decided by an integer whose
+encoding is a guess is not a recovery path.
+
+So the fallback runs as its OWN os.execute and is judged by the same
+success/failure test as everything else. It costs one extra process spawn, on the
+failure path only, in a backend that is already the slow fallback.
 ]]
+local function run(cmd)
+	local okCall, status = pcall(M.execute, cmd)
+	if not okCall then return false, tostring(status) end
+	if status ~= 0 and status ~= true then
+		return false, "amixer exit " .. tostring(status)
+	end
+	return true, nil
+end
+
 function M.apply(c1, c2, bypass)
 	local cmd
 	if bypass then
-		cmd = string.format("%s -c %d cset numid=%d %d,%d >/dev/null 2>&1",
-		                    M.AMIXER, M.CARD, M.NUMID.enable, M.BYPASS, M.BYPASS)
+		cmd = M.bypassCommand()
 	else
 		cmd = M.buildCommand(c1, c2, M.ENABLE_BOTH)
 	end
-	local okCall, status = pcall(M.execute, cmd)
-	if not okCall then
-		return { ok = false, cmd = cmd, error = tostring(status),
-		         hardwareStateUnknown = true }
-	end
-	if status ~= 0 and status ~= true then
-		return { ok = false, cmd = cmd, error = "amixer exit " .. tostring(status),
-		         hardwareStateUnknown = true }
-	end
-	return { ok = true, cmd = cmd }
+
+	local ok, err = run(cmd)
+	if ok then return { ok = true, cmd = cmd } end
+
+	--[[
+	The chain aborted. Because it is `&&`-joined and led by the bypass, the
+	hardware is very probably already safe -- but "very probably" is what the
+	discarded-status version of this function also had. Force the bypass and
+	report whether it was CONFIRMED, so the caller can tell a filter known to be
+	off from a filter nobody can vouch for. Those two need different handling:
+	the first is safe to unwind level compensation against, the second is not.
+	]]
+	local safe = run(M.bypassCommand())
+	return { ok = false, cmd = cmd, error = err,
+	         safeBypassed = safe, hardwareStateUnknown = not safe }
 end
 
 --[[

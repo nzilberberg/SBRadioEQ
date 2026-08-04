@@ -36,6 +36,65 @@ Controls are knob-only, because the Radio's arrows are remote-only:
 
 ## Installing
 
+In LMS, go to **Settings → Plugins → Additional Repositories** and add:
+
+```
+https://nzilberberg.github.io/SBRadioEQ/repo.xml
+```
+
+Then on the Radio: **Settings → Advanced → Applet Installer → SBRadioEQ**. The Radio reboots when
+it finishes. Afterwards the EQ lives at **Settings → Audio Settings → Tone Controls**.
+
+That URL is a *catalog*: it is stable, and it is rewritten to point at each new release, so updates
+are offered to you as they appear. The release archives it points at are immutable and carry a
+SHA-1 the installer checks.
+
+> **If you installed v0.2.0**, the URL you were given was
+> `.../releases/download/v0.2.0/repo.xml` — a descriptor stored inside that one release, which can
+> never mention a later version. Replace it with the catalog URL above, or you will never be
+> offered an update. This is fixed from v0.2.1 onward.
+
+**Requirements.** A Squeezebox Radio (`baby`) — the coefficient controls live in that model's
+TLV320AIC3104 and nowhere else, and the applet refuses to register on anything else. Interactive
+editing also needs the device's in-process mixer module `baby_bsp`; without it the editor declines
+to open rather than fall back to a path that would stall the UI.
+
+### Removing it
+
+Use the Applet Installer's own removal. The Radio reboots, and because the codec's filter registers
+are volatile, the reboot clears the EQ completely — no tone modification survives it.
+
+**One thing does survive: the player volume.** See *Level matching* below. Run **Tone Controls →
+Reset Tone** before uninstalling and the make-up gain is wound back out; skip it and playback stays
+as much as ~27 dB louder than the curve warranted, until you turn it down by hand.
+
+---
+
+## Level matching
+
+The codec cannot express gain above unity, so a "+12 dB bass" is realised as 0 dB bass and −12 dB
+everywhere else, and the level is bought back by raising the *player's* volume. That make-up is
+what "Level Matching" controls, and at full two-band boost it reaches about 27 dB.
+
+Two consequences worth knowing:
+
+- The volume control is doing work on your behalf. Switching Level Matching off unwinds the make-up
+  rather than stranding it, and Reset Tone takes it back to zero.
+- The make-up lives in the player volume, which persists independently of this applet — hence the
+  removal note above.
+
+If a boost would need more make-up than the current volume can pay for, the applet refuses it and
+the header shows the shortfall rather than letting the output sag.
+
+**When a hardware write fails**, the applet does not raise the volume and records the failure to
+syslog (`SBEQ-HWFAIL`). It is not yet reported on screen, and a failure during Reset Tone can leave
+make-up in the player volume with a flat curve until the next successful apply. Both are being
+fixed; until then, syslog is where the evidence is.
+
+---
+
+## Working on it
+
 Applets live on the Radio's unionfs overlay, so they survive a reboot.
 
 ```bash
@@ -51,11 +110,17 @@ That script is deliberately paranoid, because a broken applet can leave the UI u
 5. restarts SqueezePlay, waits for the old process to actually die, and fails if more than one
    instance ends up running
 
-Then open **Settings → Audio Settings → Equalizer**. The build number shows in the status bar's
-bottom-right corner; if it does not match what the deploy printed, you are looking at an older
-render (the screen does not survive a restart — reopen it).
+The build number shows in the status bar's bottom-right corner; if it does not match what the
+deploy printed, you are looking at an older render (the screen does not survive a restart — reopen
+it).
 
 To roll back, delete `/usr/share/jive/applets/SBRadioEQ/` and restart SqueezePlay.
+
+Cutting a release is `sh tools/package.sh <version>`, then `gh release create`, then
+`sh tools/verify-release.sh <version>` — which fetches the *served* bytes back and checks the
+descriptor against them, because generating a descriptor is not evidence that the right one was
+published. Committing `docs/repo.xml` is part of releasing, not an afterthought: it is the file
+installed users actually poll.
 
 ---
 
@@ -110,7 +175,20 @@ graph shows it honestly rather than hiding it.
 
 ## Status
 
-Working and in daily use. Not published to the LMS plugin repository.
+Working and in daily use. Released as v0.2.0; installable from the catalog URL above. Not listed in
+the central LMS plugin repository — that would be a pull request to
+`lms-community/lms-plugin-repository`, and it has not been made.
 
-Not built: settings persistence across a power cycle — the codec returns to its defaults and the
-applet does not yet re-apply on boot.
+**Settings do survive a power cycle.** The codec's registers are volatile, so the applet re-applies
+the saved curve at startup from its Meta (`configureApplet`), verified on a cold boot with the
+screen never opened.
+
+Known gaps, in the order they matter:
+
+- A failed hardware write is not surfaced on screen, and every save path persists the requested
+  curve as though it had been applied. During Reset Tone that can leave make-up gain over a flat
+  curve until the next successful apply.
+- The endpoint-change case is untested: `SqueezeboxBabyApplet` rewrites codec state on headphone
+  insert and on power transitions, which will silently drop the filter.
+- Reset Tone and Level Matching are structurally tested but have never been watched through by a
+  human on a live player.

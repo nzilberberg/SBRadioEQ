@@ -94,9 +94,27 @@ case "$url" in
 esac
 
 # --- the archive must still be flat ---------------------------------------
-if command -v powershell.exe >/dev/null 2>&1; then
+#
+# ⛔ THIS USED TO BE WRAPPED IN `if command -v powershell.exe`, SO ON ANY MACHINE
+# WITHOUT POWERSHELL BOTH CHECKS BELOW SILENTLY DID NOT RUN -- and the script
+# still printed "<version> is consistent". A skipped check that reports success is
+# worse than a missing check, because the summary line is what anyone reads. The
+# lister is now chosen from what exists, and its total absence is a FAILURE to
+# verify, not a pass. (Same block as package.sh's; keep the two in step.)
+if command -v zipinfo >/dev/null 2>&1; then
+	listing=$(zipinfo -1 "$TMP/$ZIPNAME")
+elif command -v unzip >/dev/null 2>&1; then
+	listing=$(unzip -Z1 "$TMP/$ZIPNAME")
+elif command -v powershell.exe >/dev/null 2>&1; then
 	listing=$(powershell.exe -NoProfile -Command \
-		"Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$TMP/$ZIPNAME")').Entries | ForEach-Object { \$_.FullName }" 2>/dev/null | tr -d '\r')
+		"Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$TMP/$ZIPNAME")').Entries | ForEach-Object { \$_.FullName }" | tr -d '\r')
+else
+	listing=""
+fi
+
+if [ -z "$listing" ]; then
+	bad "could not list the archive (no zipinfo, unzip or powershell.exe) -- flatness UNVERIFIED"
+else
 	if echo "$listing" | grep -q '/'; then
 		bad "archive contains directories -- the Applet Installer will install nothing"
 	else
@@ -106,6 +124,59 @@ if command -v powershell.exe >/dev/null 2>&1; then
 		bad "development scripts leaked into the release archive"
 	else
 		ok "no tests or diagnostics in the archive"
+	fi
+fi
+
+# --- the STABLE catalog must advance ---------------------------------------
+#
+# The archive is immutable and the catalog is not; that is the whole point of
+# docs/repo.xml. What can go wrong is publishing a release and forgetting to
+# commit the catalog, which leaves every existing installation polling a
+# descriptor that still names the PREVIOUS version -- silently, at both ends.
+# The release looks published because the assets are there.
+#
+# ⛔ ANCHOR PRECISELY. This one-line extraction was wrong TWICE, and both times it
+# returned a plausible-looking answer rather than an error:
+#
+#   version="[^"]*"     matches the XML DECLARATION first -- <?xml version="1.0">
+#                       -- so every descriptor ever written reads as version 1.0.
+#   <applet[^>]*>       matches the CONTAINER <applets> first, which carries no
+#                       version at all, so head -1 yields an empty string and the
+#                       release is reported stale against nothing.
+#
+# The space in `<applet ` is what separates the element from its container. Both
+# faults were found by running the check, not by reading it. Same family as
+# amixer's type line, whose `values=` is the value COUNT.
+catalog_version() {
+	grep -o '<applet [^>]*>' "$1" 2>/dev/null | head -1 \
+		| grep -o 'version="[^"]*"' | head -1 | sed 's/version="//;s/"//' || true
+}
+
+STABLE_LOCAL="$HERE/docs/repo.xml"
+if [ ! -f "$STABLE_LOCAL" ]; then
+	bad "docs/repo.xml is missing -- installed users poll that file and would never see $VERSION"
+else
+	sv=$(catalog_version "$STABLE_LOCAL")
+	if [ "$sv" = "$VERSION" ]; then
+		ok "docs/repo.xml (the stable catalog) names $VERSION"
+	else
+		bad "docs/repo.xml still names $sv, not $VERSION -- commit the catalog or nobody is offered the update"
+	fi
+fi
+
+if [ "$MODE" != "--local" ]; then
+	SURL="${STABLE_URL:-https://nzilberberg.github.io/SBRadioEQ/repo.xml}"
+	scode=$(curl -sIL -o /dev/null -w '%{http_code}' "$SURL" || echo 000)
+	if [ "$scode" != "200" ]; then
+		bad "the stable catalog $SURL is not reachable (HTTP $scode) -- is GitHub Pages enabled?"
+	else
+		curl -sL -o "$TMP/stable.xml" "$SURL"
+		psv=$(catalog_version "$TMP/stable.xml")
+		if [ "$psv" = "$VERSION" ]; then
+			ok "the SERVED stable catalog offers $VERSION"
+		else
+			bad "the served stable catalog offers $psv, not $VERSION -- existing installs will not see the update"
+		fi
 	fi
 fi
 

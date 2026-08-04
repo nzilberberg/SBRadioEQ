@@ -499,6 +499,7 @@ function _applyNow(self)
 	self.hwError = (res and res.error) or "hardware write failed"
 	log:warn("SBEQ-HWFAIL ", self.hwError,
 	         " unknownState=", tostring(res and res.hardwareStateUnknown),
+	         " safeBypassed=", tostring(res and res.safeBypassed),
 	         " stillMuted=", tostring(res and res.stillMuted),
 	         " build=", BUILD)
 end
