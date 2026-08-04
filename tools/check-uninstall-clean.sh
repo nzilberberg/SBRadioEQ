@@ -8,7 +8,9 @@
 #
 # The PASSING outcome is the loud one. A boost is realised as cut-elsewhere plus
 # make-up gain folded into the player volume, so while the EQ is active the
-# player volume is sitting up to ~15 dB above where the user set it. This test
+# player volume is sitting up to ~34 dB above where the user set it (MEASURED:
+# 15.0 dB one band at +15, 30.0 dB both at +15 Q1.0, 34.41 dB at Q2.0 -- the old
+# ~15 dB figure here was the SINGLE-BAND number). This test
 # removes the applet and reboots. If the codec resets as it should, the cut
 # disappears and that elevated volume is left over unattenuated audio.
 #

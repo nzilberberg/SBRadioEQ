@@ -3,8 +3,8 @@
 #
 #   sh tools/check-levelmatch-gated.sh
 #
-# Level matching is not one line of code. It reaches six places, and switching
-# it off has to switch off all six or the feature is half-off -- which is worse
+# Level matching is not one line of code. It reaches FOUR places, and switching
+# it off has to switch off all of them or the feature is half-off -- which is worse
 # than either state, because the parts that remain are now acting on a premise
 # the user has withdrawn:
 #
@@ -72,7 +72,7 @@ echo ""
 echo "every player volume move is inside a levelMatch-aware function:"
 report=$(printf '%s\n' "$code" | awk '
 	/^function [A-Za-z_]+/ { fn = $2; sub(/\(.*/, "", fn); hasvol = 0; hasgate = 0 }
-	/player:volume\(/      { if (fn != "") hasvol = 1 }
+	/:volume\([^)]/        { if (fn != "") hasvol = 1 }
 	/s\.levelMatch/        { if (fn != "") hasgate = 1 }
 	/^end/ {
 		if (fn != "" && hasvol) printf "%s %s\n", fn, (hasgate ? "ok" : "UNGATED")
@@ -121,4 +121,4 @@ if [ "$fail" -gt 0 ]; then
 	echo "check-levelmatch-gated: FAILED"
 	exit 1
 fi
-echo "check-levelmatch-gated: all six effect sites are gated"
+echo "check-levelmatch-gated: every effect site is gated, and one function owns the volume"

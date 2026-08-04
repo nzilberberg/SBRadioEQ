@@ -572,7 +572,41 @@ function _applyNow(self, allowShell)
 		-- Only when the muted path did not already do it: the no-op early returns
 		-- and the shell fallback never take the callback. Calling twice would
 		-- compute a second delta against an appliedAtten the first call moved.
-		if not (res.reconciled) then self:_levelMatch(target) end
+		--[[
+		⛔ A VOLUME-ONLY CHANGE CAN FAIL WHILE THE HARDWARE SUCCEEDS.
+
+		applyBSPMuted returns a no-op success when the coefficients and bypass
+		state already match what is in the chip, and in that case it never runs the
+		reconcile callback -- so the volume move happens here instead. Its result
+		used to be DISCARDED, and the hardware's success returned as the whole
+		operation's success.
+
+		The reachable case is the Level Matching checkbox: no coefficient changes
+		at all, but switching it demands a volume move. With no local player that
+		move fails, and the setting was stored as applied. Switching it OFF is part
+		of returning the Radio to an uncompensated state, which makes a false
+		success there exactly the wrong lie.
+
+		audioSafe and ok are different questions. Failing to RAISE the volume
+		leaves the output quieter than asked -- disappointing, not dangerous.
+		Failing to LOWER it leaves old make-up standing over less attenuation,
+		which is the loud state.
+		]]
+		if not res.reconciled then
+			local before = s.appliedAtten or 0
+			local lr     = self:_levelMatch(target)
+			res.levelResult  = lr
+			res.fullyApplied = (lr == nil) or (lr.ok and true or false)
+			if lr and not lr.ok then
+				res.ok        = false
+				res.audioSafe = (target >= before)
+				res.error     = lr.error
+				self.hwError  = lr.error
+				log:warn("SBEQ-LEVELFAIL err=", tostring(lr.error),
+				         " target=", tostring(target), " before=", tostring(before),
+				         " audioSafe=", tostring(res.audioSafe), " build=", BUILD)
+			end
+		end
 		return res
 	end
 
@@ -1136,14 +1170,19 @@ end
 --[[
 THE TONE MENU -- the screen in front of the EQ.
 
-Every row is wired. Level Match and Reset Tone
-are placeholders for screens that do not exist yet and are deliberately inert:
-they carry NO callback rather than an empty one, so pressing them does nothing at
-all instead of playing a transition sound and going nowhere.
+⛔ THIS COMMENT USED TO SAY Level Match and Reset Tone were inert placeholders
+with no callback, and that Level Match's checkbox was "still a literal". All
+three statements were false by the time anyone read them -- both rows have been
+live since 2026-08-03, and a checkbox whose initial state is a hardcoded literal
+while its callback is wired is the exact lie check-bypass-single-source.sh exists
+to catch. A stale comment describing a safer, simpler system than the one that
+ships is how a later change reintroduces the old assumption.
 
-Level Match's checkbox is still a literal, and stays that way until it does
-something. A box that shows a real state but ignores the press is worse than one
-that is plainly disconnected.
+All five rows are live: Tone Control (the bypass tick box), Tone, Equalizer,
+Level Matching and Reset Tone. Both tick boxes read their initial state from
+settings.enabled / settings.levelMatch -- the single sources -- and both write
+through the same apply transaction, reporting failure via _reportApply because a
+stock menu row has no canvas of its own to show it on.
 
 Built from the stock widgets the device's own settings screens use --
 SimpleMenu + Checkbox with style 'item_choice' -- rather than the Canvas the EQ
@@ -1602,26 +1641,30 @@ function toneShow(self, menuItem)
 			return EVENT_CONSUME
 
 		elseif k == KEY_BACK and self.toneEditing then
-			-- BACK cancels the edit and must restore the VOLUME too, not just
-			-- the gain: level matching moved the player volume while editing,
-			-- so restoring the number alone leaves the make-up asserting an
-			-- attenuation that is no longer there.
+			--[[
+			⛔⛔ CANCEL DOES NOT MOVE THE VOLUME ITSELF. IT LETS THE TRANSACTION DO IT.
+
+			This used to roll the player volume back here, BEFORE _applyNow, and
+			that is outside the PCM mute -- the exact ordering defect fixed in the
+			main path. Cancelling from a reduced edit back to a strongly boosted
+			snapshot raised the volume first and restored the stronger attenuation
+			afterwards, so the make-up briefly stood over a filter that had not
+			been put back yet.
+
+			It was invisible to test_ordering, which drives applyBSPMuted and never
+			runs this handler.
+
+			The fix is not to move the volume more carefully -- it is not to move it
+			here at all. restoreSnapshot puts back the snapshot's controls AND its
+			old appliedAtten; keeping the REAL appliedAtten instead means the
+			transaction sees "currently carrying X, target is Y" and reconciles the
+			whole difference inside the mute, in the safe order, with the failure
+			handling everything else already has.
+			]]
 			local s          = self:getSettings()
-			local player     = Player:getLocalPlayer()
-			local cur        = player and player:getVolume()
 			local appliedNow = s.appliedAtten or 0
 			U.restoreSnapshot(s, self.snap)
-			-- Gated even though it is self-neutralising: with level matching off
-			-- appliedAtten stays 0 through the whole edit, so cancelVolumeDb's
-			-- (appliedNow - appliedAtSnapshot) is 0 and the volume would not
-			-- move anyway. Relying on a value happening to be zero is how a
-			-- residue bug starts; say what is meant instead.
-			if s.levelMatch and player and cur then
-				local wantDb = U.cancelVolumeDb(D.volumeToDb(cur), appliedNow,
-				                                s.appliedAtten or 0)
-				local newVol = D.dbToVolume(wantDb)
-				if newVol ~= cur then player:volume(newVol, true) end
-			end
+			s.appliedAtten   = appliedNow      -- the volume is still where it is
 			self.snap        = nil
 			self.toneEditing = false
 			self:_design()
@@ -1857,23 +1900,19 @@ function settingsShow(self, menuItem)
 			Undo exactly what this edit applied, rather than snapping to a
 			remembered volume, so a manual volume change made mid-edit survives.
 			]]
-			local player     = Player:getLocalPlayer()
-			local cur        = player and player:getVolume()
+			--[[
+			⛔⛔ THE VOLUME IS NOT MOVED HERE. See the matching note on the Tone
+			screen's cancel: rolling it back at this point happens OUTSIDE the PCM
+			mute, which is the ordering defect the main path already fixed.
+
+			Keeping the REAL appliedAtten across restoreSnapshot is what makes the
+			transaction able to do it: it then sees the true current make-up and
+			the snapshot's target, and reconciles the difference inside the mute.
+			]]
 			local appliedNow = s.appliedAtten or 0
 
 			U.restoreSnapshot(s, self.snap)
-
-			-- Gated even though it is self-neutralising: with level matching off
-			-- appliedAtten stays 0 through the whole edit, so cancelVolumeDb's
-			-- (appliedNow - appliedAtSnapshot) is 0 and the volume would not
-			-- move anyway. Relying on a value happening to be zero is how a
-			-- residue bug starts; say what is meant instead.
-			if s.levelMatch and player and cur then
-				local wantDb = U.cancelVolumeDb(D.volumeToDb(cur), appliedNow,
-				                                s.appliedAtten or 0)
-				local newVol = D.dbToVolume(wantDb)
-				if newVol ~= cur then player:volume(newVol, true) end
-			end
+			s.appliedAtten = appliedNow        -- the volume is still where it is
 
 			self.snap    = nil
 			self.editing = false

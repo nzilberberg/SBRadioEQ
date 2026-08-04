@@ -33,11 +33,38 @@ APPLET="$HERE/applet/SBRadioEQApplet.lua"
 # on first use, then verify -- a development convenience should not silently turn
 # off authentication of a root target.
 SSHOPT="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=25"
-SSH="ssh $SSHOPT"
-SCP="scp -O $SSHOPT"
+# ConnectTimeout bounds the TCP connect ONLY, not authentication. The Radio has no
+# SSH key (deliberately), so an ssh that connects and then stops at a password
+# prompt waits FOREVER. Every call needs a hard timeout as well. Override with
+# SSH_TIMEOUT= if a legitimately slow step needs longer.
+SSH="timeout ${SSH_TIMEOUT:-180} ssh $SSHOPT"
+SCP="timeout ${SSH_TIMEOUT:-180} scp -O $SSHOPT"
 
+#[[ ---- --stage-only ---------------------------------------------------------
+#
+# ⛔ SWAPPING THE DIRECTORY UNDER A LIVE JIVE GIVES A MIXED-VERSION PROCESS.
+#
+# The atomic directory swap guarantees the files on DISK are never a mixture. It
+# guarantees nothing about the modules already resident in the running Jive: the
+# Meta and uistate are loaded at startup, while the main Applet is loaded lazily
+# when the screen is first opened. Skip the restart and a later screen-open can
+# pair NEW applet code with OLD state helpers in one process -- which produces
+# test results that describe a build that does not exist anywhere.
+#
+# So the flag no longer claims to have deployed anything runnable. It stages, and
+# it says plainly that the applet must not be opened until Jive restarts.
+# `--no-restart` is kept as a deprecated alias so an existing habit does not
+# silently do something different from what it used to.
+#]]
 restart=yes
-[ "$1" = "--no-restart" ] && restart=no
+stageonly=no
+case "$1" in
+	--stage-only|--stage-without-activating) restart=no; stageonly=yes ;;
+	--no-restart)
+		restart=no; stageonly=yes
+		echo "note: --no-restart is now --stage-only; the applet is NOT active until you restart"
+		;;
+esac
 
 # ---- the manifest -------------------------------------------------------
 # Everything that belongs in the installed applet directory, once.
@@ -229,6 +256,17 @@ $SSH "$RADIO" "rm -rf $DEST.old" >/dev/null 2>&1 || true
 
 SUCCESS=1
 echo ""
+if [ "$stageonly" = yes ]; then
+	# Do NOT call this deployed. Nothing is running the new code, and if the
+	# screen is opened before a restart the process can mix old and new modules.
+	echo "STAGED build $next -- NOT ACTIVE."
+	echo "  The files are in place; the running Jive still holds the previous"
+	echo "  modules. Do NOT open the applet until you restart, or you will be"
+	echo "  testing a mixture of builds that exists nowhere else:"
+	echo "    ssh <radio> /etc/init.d/squeezeplay restart"
+	exit 0
+fi
+
 echo "DEPLOYED build $next."
 # The menu path is DERIVED from strings.txt, not typed here. It was typed here
 # once, the EQ moved one level down behind a Tone Controls menu, and this line

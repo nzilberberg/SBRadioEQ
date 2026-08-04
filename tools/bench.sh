@@ -59,8 +59,11 @@ for a in "$@"; do
 	esac
 done
 
-SSH="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $SSH_EXTRA"
-SCP="scp -O -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $SSH_EXTRA"
+# ConnectTimeout bounds the TCP connect ONLY, not authentication -- an ssh that
+# stops at a password prompt hangs forever. Bench runs can be legitimately long,
+# so the default is generous; override with SSH_TIMEOUT= for a long sweep.
+SSH="timeout ${SSH_TIMEOUT:-300} ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $SSH_EXTRA"
+SCP="timeout ${SSH_TIMEOUT:-300} scp -O -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $SSH_EXTRA"
 
 #[[ ⛔ A TIMING RUN ON A BUSY DEVICE IS WORSE THAN NO TIMING RUN.
 #

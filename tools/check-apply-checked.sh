@@ -156,6 +156,44 @@ else
 	echo "  ok   Reset Tone does not emit an unconditional success log"
 fi
 
+# --- E. ONE OWNER for player volume ----------------------------------------
+#
+# ⛔⛔ THE CLASS THIS EXISTS FOR. The ordering fix put the volume move inside the
+# PCM mute -- and both Back-cancel handlers went on doing their OWN
+# player:volume() rollback beforehand, outside the mute, which is the same defect
+# in a place the fix never swept. It was invisible to test_ordering, which drives
+# the low-level function and never runs a UI handler.
+#
+# So the rule is structural rather than careful: exactly one function may write
+# player volume, and it is the transaction-aware one. Anything else is the defect
+# reappearing somewhere new.
+# ⛔ MATCH THE CALL, NOT THE VARIABLE NAME. The first version of this check
+# grepped `player:volume(` and a fixture calling the same method through a
+# variable named `p` walked straight past it -- the gate would have enforced a
+# naming convention while believing it enforced an invariant. `:volume(` with at
+# least one argument is the WRITE; the read is getVolume().
+owners=$(awk '
+	/^function [A-Za-z_]/ { fn = $2; sub(/\(.*/, "", fn) }
+	/:volume\([^)]/       { print (fn == "" ? "<top-level>" : fn) }
+' "$APPLET" "$HERE"/lua/*.lua | sort -u)
+
+[ -n "$owners" ] || {
+	echo "FAIL(2): no player:volume() call found at all -- the gate cannot be"
+	echo "         checking what it thinks it is checking."
+	exit 2
+}
+
+strays=$(echo "$owners" | grep -v '^_levelMatch$' || true)
+if [ -z "$strays" ]; then
+	echo "  ok   player volume is written only by _levelMatch"
+else
+	echo "FAIL: player:volume() is called outside _levelMatch, by:"
+	echo "$strays" | sed 's/^/        /'
+	echo "      Only the transaction-aware path may move the volume -- anywhere"
+	echo "      else is outside the PCM mute, which is the ordering defect."
+	bad=$((bad + 1))
+fi
+
 echo ""
 if [ "$bad" -eq 0 ]; then
 	echo "check-apply-checked: a failed apply is unwound and visible"
