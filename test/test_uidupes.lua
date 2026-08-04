@@ -62,10 +62,16 @@ local function literals(path)
 		--[[
 		⛔ BLOCK COMMENTS TOO, NOT JUST LINE COMMENTS.
 
-		Only `^%s*--` was skipped, so the BODY of a --[[ ]] block was scanned as
-		if it were code. This file's own convention is to explain a message by
-		quoting it, and the moment a comment quoted the text of a Textarea the
-		gate reported the message as a duplicate of itself:
+		Only `^%s*--` was skipped, so the BODY of a long-bracket comment was
+		scanned as if it were code. This file's own convention is to explain a
+		message by quoting it, and the moment a comment quoted the text of a
+		Textarea the gate reported the message as a duplicate of itself:
+
+		(The delimiters are described rather than written here on purpose. Lua
+		long comments do NOT nest, so a literal closing bracket inside this block
+		ends it early and turns the remaining prose into code -- which is exactly
+		what the first version of this comment did, and the file then failed to
+		load at all.)
 
 		    line 1595   "turn the volume down before uninstalling", in prose
 		    line 1628   the same sentence, actually drawn
