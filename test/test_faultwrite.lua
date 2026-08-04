@@ -148,12 +148,26 @@ do
 	flagged it. Testing the complete-write case as if it were partial would have
 	forced a wrong "fix" into the production path.
 	]]
+	--[[
+	⛔ SELECT ON "THE COEFFICIENT WRITE FAILED", NOT ON hardwareStateUnknown.
+
+	This loop used to pick its rows with res.hardwareStateUnknown, which was then
+	set on every write failure. It now means something stricter and more useful --
+	"nobody can vouch for the chip's state" -- and is FALSE when the recovery
+	bypass is confirmed, which is exactly what happens in these single-fault
+	fixtures. The selector therefore matched zero rows and the assertion failed on
+	`partials > 0` while the property it guards still held.
+
+	ok == false with writes == 0 is the real predicate: the write did not
+	complete. (A restore failure returns ok == false with writes == n, and the
+	no-op path returns ok == true.)
+	]]
 	local bad, partials = {}, 0
 	for k = 3, baseline do
 		A.forgetMutePoint(); A.mutePoint()
 		local s = stub(k)
 		local _, res = pcall(A.applyBSPMuted, s, d1, d2, PREV, false, false)
-		if type(res) == "table" and res.hardwareStateUnknown then
+		if type(res) == "table" and res.ok == false and res.writes == 0 then
 			partials = partials + 1
 			local lastEnable
 			for _, e in ipairs(s.seq) do
@@ -193,6 +207,38 @@ do
 		   end
 		   return true
 	   end)(), string.format("%d writes, mute control only", s.n))
+end
+
+--[[
+COMPOUND FAULT -- the case the single-fault sweep above cannot reach.
+
+Every fixture so far breaks ONE write, so the recovery bypass that follows always
+succeeds and the device is safely unmuted. The dangerous combination is a write
+that fails while the enable control is broken FOR GOOD: then the recovery cannot
+be confirmed, and restoring the volume would unmute into a filter nobody can
+vouch for -- possibly a partial coefficient set, which is the +42.1 dB
+intermediate diag_shriek measured.
+
+Silence is the correct outcome here, and it must be REPORTED (stillMuted) so the
+screen can explain it. Silence with a cause is a different thing from silence
+with none.
+]]
+print("=== COMPOUND FAULT: recovery bypass fails too -> stay muted ===")
+do
+	A.forgetMutePoint(); A.mutePoint()
+	local s = stub(0, A.NAME.enable)      -- the enable control never works
+	local _, res = pcall(A.applyBSPMuted, s, d1, d2, PREV, false, false)
+	local t = (type(res) == "table") and res or {}
+
+	ok("reports failure", t.ok == false, tostring(t.error))
+	ok("does NOT claim the bypass was confirmed", not t.safeBypassed,
+	   "safeBypassed=" .. tostring(t.safeBypassed))
+	ok("reports the hardware state as unknown", t.hardwareStateUnknown == true,
+	   "hardwareStateUnknown=" .. tostring(t.hardwareStateUnknown))
+	ok("leaves the device MUTED rather than unmuting into it",
+	   t.stillMuted == true and restoreWrites(s) == 0,
+	   string.format("stillMuted=%s, restore writes=%d",
+	                 tostring(t.stillMuted), restoreWrites(s)))
 end
 
 print("=== a clean run still reports ok=true and writes ===")

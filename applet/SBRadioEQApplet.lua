@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 42
+local BUILD = 43
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
