@@ -42,6 +42,15 @@ SSHOPT="-o PreferredAuthentications=password -o StrictHostKeyChecking=no"
 SSH="timeout ${SSH_TIMEOUT:-180} ssh $SSHOPT"
 SCP="timeout ${SSH_TIMEOUT:-300} scp -O $SSHOPT"
 
+# ⛔ THE RUN ITSELF NEEDS ITS OWN, MUCH LONGER BOUND. The setup calls are quick,
+# but the whole suite is ~24 files against a 360 MHz core and takes minutes. The
+# first version reused the 180 s setup timeout here and reported
+# "the run itself did not complete" -- indistinguishable, from the output alone,
+# from a device that had dropped off. Every ssh still needs SOME hard bound
+# (a detached ssh waiting on auth hangs forever), so this is a bigger number,
+# not an unbounded call.
+SSH_RUN="timeout ${SUITE_TIMEOUT:-900} ssh $SSHOPT"
+
 $SSH "$RADIO" "rm -rf $REMOTE && mkdir -p $REMOTE" || {
 	echo "FAIL(2): could not prepare $REMOTE on $RADIO"
 	exit 2
@@ -64,7 +73,7 @@ else
 fi
 
 echo "running in $REMOTE on $RADIO"
-out=$($SSH "$RADIO" "cd $REMOTE && for n in $WANT; do printf '%-20s ' \$n; /usr/bin/jive \$n 2>&1 | tail -1; done") || {
+out=$($SSH_RUN "$RADIO" "cd $REMOTE && for n in $WANT; do printf '%-20s ' \$n; /usr/bin/jive \$n 2>&1 | tail -1; done") || {
 	echo "FAIL(2): the run itself did not complete"
 	exit 2
 }

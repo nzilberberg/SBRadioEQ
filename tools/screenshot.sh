@@ -49,7 +49,7 @@ SSH="timeout ${SSH_TIMEOUT:-90} ssh -o StrictHostKeyChecking=accept-new -o Conne
 SCP="timeout ${SSH_TIMEOUT:-90} scp -O -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $SSH_EXTRA"
 
 # ---- the injector, written to the device ---------------------------------
-$SSH "$RADIO" "cat > /tmp/inject.sh" <<'REMOTE'
+$SSH "$RADIO" "mkdir -p /tmp/sbradioeq-shot && cat > /tmp/sbradioeq-shot/inject.sh" <<'REMOTE'
 #!/bin/sh
 Z='\000\000\000\000\000\000\000\000'
 SYN="$Z\000\000\000\000\000\000\000\000"
@@ -73,7 +73,7 @@ REMOTE
 seq=""
 for c in "$@"; do
 	case "$c" in
-		down|up|select|back|home) seq="$seq sh /tmp/inject.sh $c;" ;;
+		down|up|select|back|home) seq="$seq sh /tmp/sbradioeq-shot/inject.sh $c;" ;;
 		*) echo "FAIL: unknown command '$c' (down|up|select|back|home)"; exit 2 ;;
 	esac
 done
@@ -89,8 +89,8 @@ if [ -n "$seq" ]; then
 fi
 
 # sleep 2 is the transition settle, not padding.
-$SSH "$RADIO" "chmod +x /tmp/inject.sh; $seq sleep 2; dd if=/dev/fb0 of=/tmp/fb.raw bs=1024 count=300 2>/dev/null"
-$SCP "$RADIO:/tmp/fb.raw" "$OUT/screen.raw" >/dev/null
+$SSH "$RADIO" "chmod +x /tmp/sbradioeq-shot/inject.sh; $seq sleep 2; dd if=/dev/fb0 of=/tmp/sbradioeq-shot/fb.raw bs=1024 count=300 2>/dev/null"
+$SCP "$RADIO:/tmp/sbradioeq-shot/fb.raw" "$OUT/screen.raw" >/dev/null
 
 echo "captured $OUT/screen.raw ($(wc -c < "$OUT/screen.raw") bytes)"
 

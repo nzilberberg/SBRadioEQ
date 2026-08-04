@@ -115,18 +115,27 @@ if [ "$FRAMEWORK" -eq 1 ]; then
 fi
 #]]
 
-$SCP "$SCRIPT" $DEPS "$RADIO:/tmp/" >/dev/null
+#[[ ⛔ A DIRECTORY OF OUR OWN, NOT BARE /tmp.
+#
+# /tmp on the Radio is shared. A parallel session copied its own test file into
+# it between our copy and our run, and we executed theirs -- see
+# tools/run-suite.sh for the full account. A bench script staging under the same
+# name as another project's module has exactly the same collision.
+#]]
+BENCHDIR=/tmp/sbradioeq-bench
+$SSH -n "$RADIO" "rm -rf $BENCHDIR && mkdir -p $BENCHDIR" >/dev/null
+$SCP "$SCRIPT" $DEPS "$RADIO:$BENCHDIR/" >/dev/null
 
 OUT=$(
 if [ "$FRAMEWORK" -eq 1 ]; then
 	# jive.ui.* only resolves from the jive tree; copy in, run, clean up. The
 	# cleanup runs even on failure -- leaving files in /usr/share/jive pollutes
 	# a system directory on the user's device.
-	files="/tmp/$(basename "$SCRIPT")"
-	for d in $DEPS; do files="$files /tmp/$(basename "$d")"; done
+	files="$BENCHDIR/$(basename "$SCRIPT")"
+	for d in $DEPS; do files="$files $BENCHDIR/$(basename "$d")"; done
 	$SSH -n "$RADIO" "cp $files /usr/share/jive/ && cd /usr/share/jive && jive $NAME 2>&1; rm -f $(for f in $files; do printf '/usr/share/jive/%s ' "$(basename "$f")"; done)"
 else
-	$SSH -n "$RADIO" "cd /tmp && jive $NAME 2>&1"
+	$SSH -n "$RADIO" "cd $BENCHDIR && jive $NAME 2>&1"
 fi
 )
 
