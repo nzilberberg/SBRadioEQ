@@ -131,13 +131,29 @@ function M.affordable(attenDb, budget)
 	return (attenDb or 0) <= (budget or 0) + 0.01
 end
 
--- Only a boost has to be afforded. A cut demands no make-up and must ALWAYS be
--- permitted, or a user who has run out of headroom is trapped at that setting.
-function M.mustCheckAffordability(key, newValue, oldValue)
-	local r = M.RANGE[key]
-	if not r or r.kind ~= "gain" then return false end
-	return newValue > oldValue
-end
+--[[
+⛔ M.mustCheckAffordability WAS REMOVED 2026-08-04 -- do not reintroduce it.
+
+It decided whether to run the headroom check from WHICH CONTROL MOVED:
+
+    if not r or r.kind ~= "gain" then return false end
+    return newValue > oldValue
+
+so Q and frequency edits skipped the check. But Q changes the cost -- measured
+on the device, both bands at +15 need 30.00 dB of make-up at Q 1.0 and 34.41 dB
+at Q 2.0. An unaffordable Q step was therefore accepted, written, and reported
+as applied while the output sagged.
+
+Worse, the suite ASSERTED the hole: test_headroom carried "frequency is never
+checked" and "Q is never checked" as passing expectations, so the defect had a
+test defending it.
+
+The replacement lives in the applet's _design, which compares the DESIGNED
+attenDb of the candidate curve against the budget -- the quantity the guard
+actually protects, rather than a proxy for it. It covers any parameter, present
+or future, that changes what the curve costs. M.affordable above is still the
+comparison; only the decision about WHEN to apply it moved.
+]]
 
 --[[
 EDIT SNAPSHOT -- what Back restores.
@@ -166,26 +182,19 @@ function M.restoreSnapshot(s, snap)
 end
 
 --[[
-Where the VOLUME has to go when an edit is cancelled.
+⛔ M.cancelVolumeDb WAS REMOVED 2026-08-04 -- do not reintroduce it.
 
-Restoring appliedAtten alone is not enough, and is actively wrong: appliedAtten
-is bookkeeping ABOUT the player volume, not a copy of it. Live editing moves the
-real volume -- drop a +15 band to 0 and the volume comes down ~15 dB to match --
-so putting the number back while leaving the volume down claims 15 dB of make-up
-that is not there. The curve returns and the level does not.
+It computed a volume for cancel to write DIRECTLY, and that direct write was the
+v0.2.2 ordering defect: it happened before the apply transaction and therefore
+outside the PCM mute, so cancelling back to a stronger curve raised the volume
+before the attenuation was restored.
 
-Undo exactly what THIS EDIT applied, rather than snapping to a remembered
-volume: appliedAtten is the running total of the make-up we have added, so the
-difference between now and the snapshot is our contribution and nothing else.
-Anything the user did to the volume knob mid-edit is left alone, because it is
-not in that difference.
-
-All in dB; the caller converts to and from the player's own scale.
+Cancel now writes no volume at all. It keeps the REAL appliedAtten across the
+snapshot restore and lets the muted transaction reconcile the difference. There
+is exactly one function permitted to write player volume -- _levelMatch -- and
+check-apply-checked enforces it. A helper whose only purpose is to compute a
+second volume path is the defect waiting to be re-adopted.
 ]]
-function M.cancelVolumeDb(currentVolumeDb, appliedNow, appliedAtSnapshot)
-	local ours = (appliedNow or 0) - (appliedAtSnapshot or 0)
-	return (currentVolumeDb or 0) - ours
-end
 
 --[[
 LEVEL MATCHING, as two pure steps.

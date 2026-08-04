@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 48
+local BUILD = 50
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -254,11 +254,67 @@ realising their boost as cut, and the midrange, which is "elsewhere" for both,
 loses roughly the sum. 14.9 dB is what the response maths alone would allow if
 the sections could hold arbitrary gain. They cannot.
 ]]
-function _design(self)
-	local s = self:getSettings()
-	local c1, c2, i = D.designPair(FS,
+local function designFrom(s)
+	return D.designPair(FS,
 		{ kind = "lowshelf",  f0 = s.bassFreq, gainDb = s.bassGain, shape = s.bassQ },
 		{ kind = "highshelf", f0 = s.trebFreq, gainDb = s.trebGain, shape = s.trebQ })
+end
+
+--[[
+⛔⛔ AFFORDABILITY IS A PROPERTY OF THE CURVE, NOT OF WHICH KNOB MOVED.
+
+The guard used to be U.mustCheckAffordability(key, new, old), which returned
+false for anything that was not a GAIN going up. So Q and frequency edits skipped
+the check entirely -- and Q changes the cost. This project's own device
+measurement says so: both bands at +15 need 30.00 dB of make-up at Q 1.0 and
+34.41 dB at Q 2.0. The same measurement that corrected the README's "27 dB" was
+sitting there proving the guard had a hole in it, and nobody read it that way.
+
+Reachable: set both gains to +15 at Q 1.0 with ~30 dB of budget (accepted, the
+volume climbs to near 100), then raise Q. No check runs, the dearer curve is
+written, the volume cannot pay the extra ~4.4 dB, and the output quietly sags --
+while the applet's own README promises it refuses what it cannot pay for.
+
+So the test is now on the QUANTITY the guard protects: design the candidate, and
+if it costs MORE than the current curve and more than the budget, put the edit
+back. That covers gain, Q, frequency, and anything added later, because it asks
+the curve rather than the field name.
+
+COST. This does NOT add a design per detent. The check moved INTO _design, which
+already computes attenDb for the curve it is building, so the ordinary path still
+runs one designPair (~150-216 ms on this hardware). A second design happens only
+when a step is actually REJECTED, which is the rare case and is already a dead
+end for the user. An earlier verified-Q-clamp proposal was priced at 620 ms-3.3 s
+per click and rejected on exactly this ground; this stays at one.
+]]
+function _design(self)
+	local s         = self:getSettings()
+	local prevAtten = self.attenDb or 0
+	local edit      = self._edit
+	self._edit      = nil
+
+	local c1, c2, i = designFrom(s)
+
+	if edit and s.levelMatch then
+		local newAtten = i.attenDb or 0
+		-- Only a curve that costs MORE can be unaffordable. A change that is
+		-- level or cheaper must always be allowed, or the user is trapped at a
+		-- setting with no way back down.
+		if newAtten > prevAtten + 0.05
+		   and not U.affordable(newAtten, self:_headroomDb()) then
+			s[edit.key]  = edit.before
+			self.limited = true
+			c1, c2, i    = designFrom(s)          -- rejected steps only
+			self.c1, self.c2 = c1, c2
+			self.realised1, self.realised2 = i.realised1, i.realised2
+			self.attenDb = i.attenDb or 0
+			self:_check(i.diag)
+			self:_recomputeCurve()
+			return
+		end
+		self.limited = false
+	end
+
 	self.c1, self.c2 = c1, c2
 	self.realised1, self.realised2 = i.realised1, i.realised2
 	self.attenDb = i.attenDb or 0
@@ -465,7 +521,34 @@ function _levelMatch(self, target)
 
 	local fromDb = D.volumeToDb(cur)
 	local newVol = D.dbToVolume(fromDb + delta)
+	--[[
+	⛔ "SAME VOLUME" IS TWO DIFFERENT OUTCOMES AND THEY WERE REPORTED AS ONE.
+
+	dbToVolume CLAMPS at 100. So a request for more make-up than the control can
+	still give produces newVol == cur, exactly like a small delta that merely
+	quantises to the same setting -- and the second is a success while the first
+	is the target being unreachable. Reported as one, a saturated volume looked
+	like "already correct", which is how an unaffordable curve could be written
+	and called applied while the output sagged.
+
+	They are told apart by whether the control is AT the limit it needed to move
+	past. Direction decides severity: failing to go UP leaves the output quieter
+	(safe, but not what was asked); failing to go DOWN leaves old make-up over
+	less attenuation, which is the loud state and must not be unmuted into.
+	]]
 	if newVol == cur then
+		local stuckUp   = (delta > 0 and cur >= 100)
+		local stuckDown = (delta < 0 and cur <= 0)
+		if stuckUp or stuckDown then
+			return { ok = false,
+			         audioSafe      = stuckUp,
+			         error          = stuckUp and "insufficient volume headroom"
+			                                  or "volume already at minimum",
+			         requestedDelta = delta,
+			         requestedAtten = target,
+			         achievedAtten  = applied,
+			         appliedAtten   = applied }
+		end
 		return { ok = true, noop = true, reason = "quantises to the same volume",
 		         requestedDelta = delta, appliedAtten = applied }
 	end
@@ -599,12 +682,44 @@ function _applyNow(self, allowShell)
 			res.fullyApplied = (lr == nil) or (lr.ok and true or false)
 			if lr and not lr.ok then
 				res.ok        = false
-				res.audioSafe = (target >= before)
+				res.audioSafe = (lr.audioSafe ~= false) and (target >= before)
 				res.error     = lr.error
 				self.hwError  = lr.error
 				log:warn("SBEQ-LEVELFAIL err=", tostring(lr.error),
 				         " target=", tostring(target), " before=", tostring(before),
 				         " audioSafe=", tostring(res.audioSafe), " build=", BUILD)
+			end
+		else
+			--[[
+			⛔ `reconciled` MEANS THE CALLBACK RAN, NOT THAT IT SUCCEEDED.
+
+			The callback answers exactly one question -- may the output be
+			unmuted? -- and an UPWARD move that failed answers yes, correctly,
+			because the result is merely quieter. applyBSPMuted then records
+			reconciled=true because nothing threw, and this branch used to take
+			that as the whole operation having succeeded.
+
+			So a real coefficient write with the local player briefly
+			unavailable applied the filter, silently skipped the make-up, cleared
+			hwError, stored the settings and reported success -- leaving the user
+			with a quieter result and no indication that level matching had not
+			happened. Not dangerous; still not what was asked for.
+
+			levelRes is the closure's own capture, so the honest answer is right
+			here after the call.
+			]]
+			res.levelResult  = levelRes
+			res.fullyApplied = (levelRes == nil) or (levelRes.ok and true or false)
+			if levelRes and not levelRes.ok then
+				res.ok        = false
+				res.audioSafe = (levelRes.audioSafe ~= false)
+				res.error     = levelRes.error
+				self.hwError  = levelRes.error
+				log:warn("SBEQ-LEVELFAIL(reconciled) err=", tostring(levelRes.error),
+				         " audioSafe=", tostring(res.audioSafe),
+				         " requested=", tostring(levelRes.requestedAtten),
+				         " achieved=", tostring(levelRes.achievedAtten),
+				         " build=", BUILD)
 			end
 		end
 		return res
@@ -936,18 +1051,10 @@ function _nudgeKey(self, key, delta)
 	then would be a limit with no cause behind it, and it would trap the user at
 	a setting for a reason that no longer applies.
 	]]
-	if s.levelMatch and U.mustCheckAffordability(key, v, before) then
-		local budget = self:_headroomDb()
-		local _, _, i = D.designPair(FS,
-			{ kind = "lowshelf",  f0 = s.bassFreq, gainDb = s.bassGain, shape = s.bassQ },
-			{ kind = "highshelf", f0 = s.trebFreq, gainDb = s.trebGain, shape = s.trebQ })
-		if not U.affordable(i.attenDb, budget) then
-			s[key]       = before
-			self.limited = true
-			return
-		end
-	end
-	self.limited = false
+	-- Hand the edit to _design, which decides affordability from the CURVE's cost
+	-- rather than from which control moved. It reverts this key if the candidate
+	-- costs more than the budget allows. See the note above _design.
+	self._edit = { key = key, before = before }
 end
 
 --[[
@@ -1478,22 +1585,57 @@ function _reportApply(self, res, title)
 	         " unwound=", tostring(self.hwUnwound), " build=", BUILD)
 	local Textarea = require("jive.ui.Textarea")
 	local w = Window("text_list", title or "Equalizer", 'settingstitle')
-	w:addWidget(Textarea("text", self:_resetFailureText(res)))
+	w:addWidget(Textarea("text", self:_applyFailureText(res)))
 	self:tieAndShowWindow(w)
 	return false
 end
 
-function _resetFailureText(self, res)
-	if res and res.stillMuted then
+--[[
+⛔ EVERY FAILURE USED TO GET RESET-SPECIFIC WORDING, AND MOST OF IT WAS WRONG.
+
+There were three messages and they were chosen mainly from self.hwUnwound, so a
+Tone Control toggle that failed was told "the equaliser could not be reset", and
+a hardware write that SUCCEEDED while only the volume fell short was told the
+equaliser had been switched off. It had not been. Telling someone their EQ is off
+when it is running, or that a reset failed when they never asked for one, sends
+them to the wrong remedy -- and one of these messages is the one that says
+"turn the volume down before uninstalling", which has to be right.
+
+The result now carries enough state to say what actually happened, so the message
+is chosen from the state and not from one inherited flag. Ordered most severe
+first: silence, then a refusal that changed nothing, then a curve that went in
+without its compensation, then a bypass, then the general case.
+]]
+function _applyFailureText(self, res)
+	res = res or {}
+
+	if res.stillMuted then
 		return "The equaliser could not be set safely, so sound is muted.\n\n" ..
 		       "Restart the Radio to restore audio."
 	end
-	if not self.hwUnwound then
+
+	if res.refused then
+		return "This firmware is missing the in-process mixer (baby_bsp), so " ..
+		       "nothing was changed.\n\nThe previous settings are still active."
+	end
+
+	-- Hardware went in; only the make-up fell short. The EQ is RUNNING.
+	if res.fullyApplied == false and res.audioSafe then
+		return "The equaliser was applied, but the volume could not be " ..
+		       "adjusted to match it.\n\nThe sound may be quieter than intended."
+	end
+
+	if res.safeBypassed then
+		if self.hwUnwound then
+			return "The equaliser could not be applied, so it was switched " ..
+			       "off and the volume compensation removed."
+		end
 		return "The equaliser was switched off, but the volume compensation " ..
 		       "could not be removed.\n\nThe Radio may be louder than usual -- " ..
 		       "turn the volume down before uninstalling."
 	end
-	return "The equaliser could not be reset.\n\nIts previous settings are " ..
+
+	return "The equaliser could not be changed.\n\nIts previous settings are " ..
 	       "still active."
 end
 
@@ -1533,7 +1675,7 @@ function resetShow(self, menuItem)
 				]]
 				local Textarea = require("jive.ui.Textarea")
 				local w = Window("text_list", "Reset Tone", 'settingstitle')
-				w:addWidget(Textarea("text", self:_resetFailureText(res)))
+				w:addWidget(Textarea("text", self:_applyFailureText(res)))
 				self:tieAndShowWindow(w)
 			end,
 		},

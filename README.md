@@ -181,7 +181,7 @@ graph shows it honestly rather than hiding it.
 
 ## Status
 
-Working and in daily use. Latest release v0.2.1; installable from the catalog URL above. Not listed
+Working and in daily use. Latest release v0.2.4; installable from the catalog URL above. Not listed
 in the central LMS plugin repository — that would be a pull request to
 `lms-community/lms-plugin-repository`, and it has not been made.
 
@@ -191,13 +191,14 @@ screen never opened.
 
 Known gaps, in the order they matter:
 
-- Failures reach the two editor screens and Reset Tone, but **not yet** the Tone Control and Level
-  Matching checkboxes, the editor accept/hold/close paths, or the window-close save. Those still
-  persist the requested curve without reporting that it was not applied.
-- The **shell fallback** (used only when `baby_bsp` is missing) has no PCM mute bracket, so with
-  make-up active it can expose bypassed audio at the compensated volume for about a second. The
-  interactive editors already refuse to open without `baby_bsp`; the boot path still uses it.
+- **Headphone insertion and removal are untested** — see the endpoint note below. That is the one
+  remaining path where the loud mismatch could occur without any edit of yours.
+- The **shell fallback** has no PCM mute bracket, so with make-up active it could expose bypassed
+  audio at the compensated volume for about a second. It is now reachable **only from the boot-time
+  re-apply**, where nothing is playing; every interactive route fails closed without `baby_bsp`.
 - The endpoint-change case is untested: `SqueezeboxBabyApplet` rewrites codec state on headphone
-  insert and on power transitions, which will silently drop the filter.
+  insert and on power transitions, which MAY drop the filter -- untested, and a hypothesis rather
+  than a confirmed defect. An LMS power off/on transition WAS measured and leaves the filter
+  byte-identical.
 - Reset Tone and Level Matching are structurally tested but have never been watched through by a
   human on a live player.

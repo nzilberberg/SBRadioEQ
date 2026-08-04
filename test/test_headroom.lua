@@ -58,13 +58,52 @@ do
 	   string.format("%.2f dB", budgetAt(100, 0)))
 end
 
-print("=== only BOOSTS have to be afforded ===")
+--[[
+⛔⛔ THIS BLOCK USED TO ASSERT THE DEFECT.
+
+It tested U.mustCheckAffordability directly, and two of its four assertions were
+"frequency is never checked" and "Q is never checked" -- passing expectations
+that the headroom guard ignored those controls. The guard did ignore them, and
+that was the bug: Q changes what the curve COSTS, so an unaffordable Q step was
+accepted, written to the codec, and reported as applied while the output sagged.
+
+A test that pins a defect in place is worse than no test, because the suite goes
+green over it and the next reader takes the behaviour as intended.
+
+What matters is the property the guard exists to protect: a change that makes the
+curve cost MORE than the budget must be refused, whichever control caused it. The
+cost is measured from the designed curve, so that is what is asserted here.
+]]
+print("=== cost is a property of the CURVE, not of which control moved ===")
 do
-	ok("raising gain is checked",       U.mustCheckAffordability("bassGain", 6, 3), "")
-	ok("lowering gain is NOT checked",  not U.mustCheckAffordability("bassGain", 3, 6),
-	   "a cut is the way out of a limited state")
-	ok("frequency is never checked",    not U.mustCheckAffordability("bassFreq", 400, 300), "")
-	ok("Q is never checked",            not U.mustCheckAffordability("bassQ", 1.5, 0.9), "")
+	local FS = 44100
+	local function costOf(bq, tq)
+		local _, _, i = D.designPair(FS,
+			{ kind = "lowshelf",  f0 = 150,  gainDb = 15, shape = bq },
+			{ kind = "highshelf", f0 = 3000, gainDb = 15, shape = tq })
+		return i.attenDb or 0
+	end
+
+	local atQ1 = costOf(1.0, 1.0)
+	local atQ2 = costOf(2.0, 2.0)
+
+	ok("raising Q with the gains unchanged costs MORE make-up", atQ2 > atQ1 + 1,
+	   string.format("Q1.0 = %.2f dB -> Q2.0 = %.2f dB (+%.2f)", atQ1, atQ2, atQ2 - atQ1))
+
+	-- The exact case the old guard waved through: budget sized for the Q 1.0
+	-- curve, then Q raised. Affordability must say no.
+	ok("a Q rise beyond the budget is NOT affordable",
+	   not U.affordable(atQ2, atQ1),
+	   string.format("needs %.2f dB, budget %.2f dB", atQ2, atQ1))
+
+	ok("the same curve is affordable against its own cost",
+	   U.affordable(atQ1, atQ1), "a step must never be refused at its own price")
+
+	-- A cut must always remain available or the user is trapped.
+	local cheaper = costOf(0.7, 0.7)
+	ok("lowering Q is always affordable once the dearer curve was",
+	   cheaper < atQ2 and U.affordable(cheaper, atQ2),
+	   string.format("%.2f dB against a %.2f dB budget", cheaper, atQ2))
 end
 
 print("=== a boost that cannot be paid for is refused ===")

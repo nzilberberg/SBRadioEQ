@@ -36,6 +36,14 @@ done
 fail=0
 code=$(sed 's/--.*$//' "$APPLET")
 
+# ⛔ A FORBIDDEN-TOKEN CHECK MUST NOT READ ITS OWN PROSE. `code` strips LINE
+# comments only, so the name of a removed function, written inside a --[[ ]]
+# block explaining why it was removed, still looks like a live call. That fired
+# on the first run of the check below -- the same trap as a gate matching the
+# word "touch" in an English sentence. This view drops block comments as well.
+codeNC=$(awk '/^[[:space:]]*--\[\[/{inc=1} !inc{print} /^[[:space:]]*\]\]/{inc=0}' "$APPLET" \
+	| sed 's/--.*$//')
+
 # ---- the flag exists and defaults ON ---------------------------------------
 echo "the setting:"
 if sed 's/--.*$//' "$UISTATE" | awk '/^M\.DEFAULTS/,/^}/' | grep -qE '^[[:space:]]*levelMatch[[:space:]]*=[[:space:]]*true'; then
@@ -93,14 +101,34 @@ fi
 echo ""
 echo "decisions derived from the make-up are gated too:"
 
-aff=$(printf '%s\n' "$code" | grep -c 'U\.mustCheckAffordability' || true)
-affg=$(printf '%s\n' "$code" | grep -c 's\.levelMatch and U\.mustCheckAffordability' || true)
-if [ "$aff" -gt 0 ] && [ "$aff" -eq "$affg" ]; then
-	echo "  ok    the affordability clamp ($affg/$aff)"
+# ⛔ THE CLAMP IS NOW COST-BASED, AND THIS CHECK HAD TO CHANGE WITH IT.
+#
+# It used to look for `s.levelMatch and U.mustCheckAffordability(...)`. That
+# helper decided whether to check from WHICH CONTROL MOVED -- gain only -- so Q
+# and frequency edits skipped the guard although Q changes what the curve costs
+# (30.00 dB at Q 1.0 vs 34.41 dB at Q 2.0, measured). The helper is gone.
+#
+# Two things must hold now: the affordability comparison is still gated on
+# levelMatch, and it is fed by a DESIGNED cost rather than a field-type test.
+aff=$(printf '%s\n' "$code" | grep -c 'U\.affordable(' || true)
+affg=$(printf '%s\n' "$code" | grep -c 'and s\.levelMatch then\|if s\.levelMatch' || true)
+if [ "$aff" -gt 0 ] && [ "$affg" -gt 0 ]; then
+	echo "  ok    the affordability clamp is gated on levelMatch ($aff comparison(s))"
 else
-	echo "  FAIL  the affordability clamp is not gated ($affg of $aff)"
+	echo "  FAIL  the affordability clamp is missing or not gated ($aff, gate $affg)"
 	echo "        with matching off nothing is paid for, so nothing can run out"
 	fail=1
+fi
+
+# The clamp must ask the CURVE what it costs. A reintroduced field-kind test is
+# the defect returning.
+if printf '%s\n' "$codeNC" | grep -q 'mustCheckAffordability'; then
+	echo "  FAIL  mustCheckAffordability is back -- affordability keyed to which"
+	echo "        control moved, not to what the curve costs. Q and frequency"
+	echo "        change the cost; that hole let an unaffordable curve be applied."
+	fail=1
+else
+	echo "  ok    affordability is decided from the designed curve's cost"
 fi
 
 hr=$(printf '%s\n' "$code" | grep -c '_headroomDb()' || true)

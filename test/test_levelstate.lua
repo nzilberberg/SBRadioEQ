@@ -141,11 +141,17 @@ do
 	ok("editing moved the volume down", st.volume < beforeEdit,
 	   string.format("%d -> %d", beforeEdit, st.volume))
 
-	-- cancel: undo exactly what this edit applied
-	local wantDb = U.cancelVolumeDb(D.volumeToDb(st.volume), st.applied, snapApplied)
-	local restored = D.dbToVolume(wantDb)
-	st.truth = st.truth - (st.applied - snapApplied)
-	st.volume, st.applied = restored, snapApplied
+	--[[
+	⛔ CANCEL NO LONGER COMPUTES A VOLUME. It used to call U.cancelVolumeDb and
+	write the result directly -- which happened BEFORE the apply transaction and
+	therefore outside the PCM mute, the v0.2.2 ordering defect.
+
+	The current design keeps the REAL appliedAtten across the snapshot restore and
+	lets the ordinary muted transaction reconcile from there. So the cancel is
+	simulated the way production does it: restore the controls, keep the real
+	compensation, then run one levelMatch toward the snapshot's target.
+	]]
+	levelMatch(st, snapApplied)          -- the transaction reconciles, muted
 
 	ok("the volume is back where it started", math.abs(st.volume - beforeEdit) <= 1,
 	   string.format("%d (was %d)", st.volume, beforeEdit))
@@ -166,11 +172,17 @@ do
 	for g = 14.5, 8, -0.5 do levelMatch(st, g) end
 	st.volume = st.volume + 6                  -- the user turns it up mid-edit
 
-	local wantDb   = U.cancelVolumeDb(D.volumeToDb(st.volume), st.applied, snapApplied)
-	local restored = D.dbToVolume(wantDb)
+	--[[
+	The property survives the architecture change, and for a better reason.
+	Reconciling from the REAL current compensation to the snapshot's target moves
+	the volume by our contribution only, so a manual change made mid-edit is
+	simply never part of the delta -- the same outcome the old direct computation
+	produced, now falling out of the transaction rather than a second code path.
+	]]
+	levelMatch(st, snapApplied)
 
-	ok("the manual +6 survives the cancel", restored > beforeEdit,
-	   string.format("restored to %d, pre-edit was %d", restored, beforeEdit))
+	ok("the manual +6 survives the cancel", st.volume > beforeEdit,
+	   string.format("restored to %d, pre-edit was %d", st.volume, beforeEdit))
 end
 
 print("=== the step floor does not silently desync the books ===")
