@@ -76,10 +76,29 @@ local function literals(path)
 			A gate that fires on its own project's naming convention gets
 			switched off, and then it defends nothing.
 			]]
+			--[[
+			⛔ TWO MORE THINGS THAT ARE NOT DRAWN TEXT -- same class as the keys
+			above, found the same way: five false positives, then two more.
+
+			A SETTINGS KEY IN A COMPARISON. `if k ~= "appliedAtten" then` is a
+			field name being tested, not a word anyone reads. Stripped by matching
+			the comparison operator in front of it.
+
+			A LOG FIELD LABEL. `log:warn(" appliedAtten=", tostring(v))` builds a
+			diagnostic line out of fragments that all end in `=`. Filtering on the
+			enclosing `log:` call does not work, because a wrapped call puts its
+			later fragments on continuation lines that contain no `log:` at all --
+			which is exactly how " appliedAtten=" was compared against the
+			settings key on line 1419 and reported as a doubled status line.
+
+			Drawn text does not end in `=`. That is the whole rule, and it is
+			narrow enough not to hide a real duplicate.
+			]]
 			local scan = line:gsub('self:string%s*%(%s*"[^"]*"%s*%)', "")
+			scan = scan:gsub('[=~]=%s*"[^"]*"', "")
 			for lit in scan:gmatch('"([^"\\]*)"') do
 				local n = normalise(lit)
-				if #n >= MIN_LEN and not lit:match("^%%") then
+				if #n >= MIN_LEN and not lit:match("^%%") and not lit:match("=%s*$") then
 					if not seen[lit] then
 						seen[lit] = true
 						out[#out + 1] = { raw = lit, norm = n, line = lineNo }
