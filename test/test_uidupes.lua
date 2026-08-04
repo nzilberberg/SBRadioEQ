@@ -55,10 +55,31 @@ local function literals(path)
 	if not fh then return nil, "cannot open " .. path end
 	local out, seen = {}, {}
 	local lineNo = 0
+	local inBlock = false
 	for line in fh:lines() do
 		lineNo = lineNo + 1
-		-- ignore comment-only lines so prose cannot masquerade as UI text
-		if not line:match("^%s*%-%-") then
+
+		--[[
+		⛔ BLOCK COMMENTS TOO, NOT JUST LINE COMMENTS.
+
+		Only `^%s*--` was skipped, so the BODY of a --[[ ]] block was scanned as
+		if it were code. This file's own convention is to explain a message by
+		quoting it, and the moment a comment quoted the text of a Textarea the
+		gate reported the message as a duplicate of itself:
+
+		    line 1595   "turn the volume down before uninstalling", in prose
+		    line 1628   the same sentence, actually drawn
+
+		Prose is not drawn text. Same trap as a forbidden-token gate matching the
+		word it forbids inside its own explanation -- and the third time this
+		project has hit it, in three different gates.
+		]]
+		if inBlock then
+			if line:match("%]%]") then inBlock = false end
+		elseif line:match("^%s*%-%-%[%[") then
+			-- a one-line --[[ ... ]] closes immediately
+			if not line:match("%]%]") then inBlock = true end
+		elseif not line:match("^%s*%-%-") then
 			--[[
 			⛔ STRING-TABLE KEYS ARE NOT DRAWN TEXT. Strip self:string("KEY")
 			before scanning.
