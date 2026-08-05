@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 52
+local BUILD = 58
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -500,7 +500,28 @@ function _levelMatch(self, target)
 		return { ok = true, noop = true, reason = "within deadband",
 		         appliedAtten = applied }
 	end
+	--[[
+	⛔ DIRECTION DECIDES, NOT THE ABSENCE ITSELF.
+
+	No player means no make-up went in. Upward, that is best-effort operation and
+	the result is merely quieter -- reporting it as a failure put EQ FAILED on
+	screen for a curve that had applied correctly. Downward it is the loud state:
+	attenuation has been reduced and its compensation is still in the volume, and
+	that must never be treated as success.
+
+	MEASURED 2026-08-04: at configureApplet time the local player DOES exist
+	(SBEQ-BOOTPROBE: player=true vol=12), so this is a rare startup-ordering case
+	rather than the routine boot path it was feared to be.
+	]]
 	if not player or not cur then
+		if delta > 0 then
+			return { ok = true, fullyMatched = false,
+			         reason         = "no local player; make-up not applied",
+			         requestedDelta = delta,
+			         requestedAtten = target,
+			         achievedAtten  = applied,
+			         appliedAtten   = applied }
+		end
 		return { ok = false, error = "no local player or volume",
 		         requestedDelta = delta, appliedAtten = applied }
 	end
@@ -525,11 +546,26 @@ function _levelMatch(self, target)
 	if newVol == cur then
 		local stuckUp   = (delta > 0 and cur >= 100)
 		local stuckDown = (delta < 0 and cur <= 0)
-		if stuckUp or stuckDown then
+		--[[
+		⛔ STUCK GOING UP IS SUCCESS. It is the whole point of best-effort level
+		matching: the volume gave everything it had, the EQ is applied as asked,
+		and the result is quieter by the remainder. Reporting ok=false here is
+		what put an error screen in front of a perfectly good curve.
+
+		Stuck going DOWN is the opposite and keeps ok=false: attenuation has
+		dropped and the make-up compensating for it could not be taken out.
+		]]
+		if stuckUp then
+			return { ok = true, fullyMatched = false,
+			         reason         = "volume at maximum; make-up incomplete",
+			         requestedDelta = delta,
+			         requestedAtten = target,
+			         achievedAtten  = applied,
+			         appliedAtten   = applied }
+		end
+		if stuckDown then
 			return { ok = false,
-			         audioSafe      = stuckUp,
-			         error          = stuckUp and "insufficient volume headroom"
-			                                  or "volume already at minimum",
+			         error          = "volume already at minimum",
 			         requestedDelta = delta,
 			         requestedAtten = target,
 			         achievedAtten  = applied,
@@ -547,7 +583,7 @@ function _levelMatch(self, target)
 	         appliedAtten = s.appliedAtten }
 end
 
-function _applyNow(self, allowShell)
+function _applyNow(self)
 	local s = self:getSettings()
 	local bypass = (not s.enabled) or (s.bassGain == 0 and s.trebGain == 0)
 
@@ -604,32 +640,26 @@ function _applyNow(self, allowShell)
 	end
 
 	--[[
-	⛔ THE SHELL PATH IS BOOT-ONLY. IT HAS NO MUTE BRACKET.
+	⛔ THERE IS EXACTLY ONE WAY TO WRITE THE CODEC, AND THIS IS IT.
 
-	A.apply bypasses the filter as its first amixer command and takes about a
-	second to run. There is no PCM mute around it, because the mute lives in the
-	BSP path -- so if make-up gain is currently folded into the player volume, that
-	whole second plays UNATTENUATED audio at the compensated level. Up to 34.41 dB
-	of it. That is the same loud state the ordering fix exists to prevent, just
-	reached through the fallback instead.
+	An amixer shell fallback used to sit here for the case where baby_bsp was
+	missing. It is gone: baby_bsp is not optional on this hardware. The stock
+	SqueezeboxBabyApplet requires it, and it is a rootfs file -- a Radio without it
+	is not a working Radio, so the fallback was code that could never run. Dead
+	code does not stay correct: that path shipped with its amixer commands joined
+	by `;` for months, which silently enabled the filter over a partially written
+	coefficient set, precisely because nothing exercised it.
 
-	Every interactive route already refuses to open without baby_bsp (both editors
-	and the Tone menu that carries the checkboxes and Reset), so in practice only
-	the boot service reaches this. `allowShell` makes that explicit rather than
-	incidental: a future caller that loses the baby_bsp guard fails closed with a
-	message instead of quietly taking the loud path.
-
-	Boot is the one place it is the right trade: nothing is playing yet, and a
-	silent failure to restore the curve would be worse than a slow write.
+	The refusal below stays as a cheap assertion. It costs two lines, cannot fire
+	on any supported device, and fails CLOSED if the assumption ever breaks --
+	which beats whatever an unguarded nil would do.
 	]]
 	local res
 	if self.bsp then
 		res = A.applyBSPMuted(self.bsp, self.c1, self.c2, self.written, bypass,
 		                      self.writtenBypass, reconcile)
-	elseif allowShell then
-		res = A.apply(self.c1, self.c2, bypass)
 	else
-		res = { ok = false, error = "no baby_bsp; refusing the unmuted shell path",
+		res = { ok = false, error = "baby_bsp is unavailable",
 		        hardwareStateUnknown = false, refused = true }
 	end
 
@@ -661,52 +691,46 @@ function _applyNow(self, allowShell)
 		Failing to LOWER it leaves old make-up standing over less attenuation,
 		which is the loud state.
 		]]
+		--[[
+		⛔ NOT FULLY MATCHED IS NOT A FAILURE.
+
+		These two branches used to set res.ok = false whenever the level result
+		was not ok, and _levelMatch used to call an upward shortfall not-ok. So a
+		curve that applied perfectly, on a volume that simply had nothing left to
+		give, produced EQ FAILED on the canvas and an error screen -- for the
+		single most ordinary thing best-effort compensation does.
+
+		_levelMatch now decides that: upward shortfalls come back ok = true with
+		fullyMatched = false, and only a DOWNWARD move that could not happen is a
+		genuine failure, because that one leaves make-up over reduced attenuation.
+
+		`reconciled` still means only that the callback RAN, not that it achieved
+		the target -- so the result is read either way, just no longer misread.
+		]]
+		local lr = levelRes
 		if not res.reconciled then
-			local before = s.appliedAtten or 0
-			local lr     = self:_levelMatch(target)
-			res.levelResult  = lr
-			res.fullyApplied = (lr == nil) or (lr.ok and true or false)
-			if lr and not lr.ok then
-				res.ok        = false
-				res.audioSafe = (lr.audioSafe ~= false) and (target >= before)
-				res.error     = lr.error
-				self.hwError  = lr.error
-				log:warn("SBEQ-LEVELFAIL err=", tostring(lr.error),
-				         " target=", tostring(target), " before=", tostring(before),
-				         " audioSafe=", tostring(res.audioSafe), " build=", BUILD)
-			end
-		else
-			--[[
-			⛔ `reconciled` MEANS THE CALLBACK RAN, NOT THAT IT SUCCEEDED.
+			lr = self:_levelMatch(target)
+		end
+		res.levelResult  = lr
+		res.fullyMatched = (lr == nil) or (lr.fullyMatched ~= false)
 
-			The callback answers exactly one question -- may the output be
-			unmuted? -- and an UPWARD move that failed answers yes, correctly,
-			because the result is merely quieter. applyBSPMuted then records
-			reconciled=true because nothing threw, and this branch used to take
-			that as the whole operation having succeeded.
-
-			So a real coefficient write with the local player briefly
-			unavailable applied the filter, silently skipped the make-up, cleared
-			hwError, stored the settings and reported success -- leaving the user
-			with a quieter result and no indication that level matching had not
-			happened. Not dangerous; still not what was asked for.
-
-			levelRes is the closure's own capture, so the honest answer is right
-			here after the call.
-			]]
-			res.levelResult  = levelRes
-			res.fullyApplied = (levelRes == nil) or (levelRes.ok and true or false)
-			if levelRes and not levelRes.ok then
-				res.ok        = false
-				res.audioSafe = (levelRes.audioSafe ~= false)
-				res.error     = levelRes.error
-				self.hwError  = levelRes.error
-				log:warn("SBEQ-LEVELFAIL(reconciled) err=", tostring(levelRes.error),
-				         " audioSafe=", tostring(res.audioSafe),
-				         " requested=", tostring(levelRes.requestedAtten),
-				         " achieved=", tostring(levelRes.achievedAtten),
-				         " build=", BUILD)
-			end
+		if lr and not lr.ok then
+			-- Downward only, by construction. This is the loud direction.
+			res.ok       = false
+			res.error    = lr.error
+			self.hwError = lr.error
+			log:warn("SBEQ-LEVELFAIL err=", tostring(lr.error),
+			         " target=", tostring(target),
+			         " requested=", tostring(lr.requestedAtten),
+			         " achieved=", tostring(lr.achievedAtten),
+			         " build=", BUILD)
+		elseif lr and lr.fullyMatched == false then
+			-- Best effort, working as intended. self.limited already puts LIMITED
+			-- on screen; syslog gets the figures at info, not warn.
+			log:info("SBEQ-PARTIAL ", tostring(lr.reason),
+			         " requested=", tostring(lr.requestedAtten),
+			         " achieved=", tostring(lr.achievedAtten),
+			         " build=", BUILD)
 		end
 		return res
 	end
@@ -768,8 +792,8 @@ end
 -- heard, and it was the wrong trade: it stole the live feel of the control, making
 -- the dial seem dead while being turned. Live feedback wins; the artifact gets
 -- fixed at its source instead.
-function _flushApply(self, allowShell)
-	return self:_applyNow(allowShell)
+function _flushApply(self)
+	return self:_applyNow()
 end
 
 ------------------------------------------------------------------- drawing
@@ -1570,17 +1594,136 @@ refused it.
 
 Returns true when the apply succeeded, so a caller can also decline to close.
 ]]
+--[[
+⛔ ONLY SILENCE INTERRUPTS. EVERYTHING ELSE IS ON-CANVAS AND IN SYSLOG.
+
+This opened a text window from nine call sites -- both checkboxes, editor accept,
+cancel, hold-to-bypass and the window-close saves. It was built when failures
+were completely invisible, and that part was right; the presentation was not.
+
+Two things settled it. Most of what fired was an upward level-matching shortfall,
+which is now correctly a success. And of what remains, NOTHING HAS EVER BEEN
+OBSERVED FIRING on real hardware: bsp:setMixer throws only on a missing control
+name (a coding error, which fails on the first write in development, not
+intermittently in a living room), and a driver-level rejection appears to be
+silent, so it would never reach here at all.
+
+So screens are not built for a hypothetical. The one case that genuinely needs a
+screen is the one where the Radio has deliberately gone quiet and the user
+otherwise has no way to know why or what to do -- that gets _mutedRecovery below.
+Everything else: EQ FAILED in the status corner where a canvas is visible, and
+the detail in syslog.
+
+Returns true when the apply succeeded, so a caller can still decline to close.
+]]
 function _reportApply(self, res, title)
 	if res and res.ok then return true end
+
 	log:warn("SBEQ-APPLYFAIL from=", tostring(title),
 	         " err=", tostring(res and res.error),
 	         " stillMuted=", tostring(res and res.stillMuted),
 	         " unwound=", tostring(self.hwUnwound), " build=", BUILD)
-	local Textarea = require("jive.ui.Textarea")
-	local w = Window("text_list", title or "Equalizer", 'settingstitle')
-	w:addWidget(Textarea("text", self:_applyFailureText(res)))
-	self:tieAndShowWindow(w)
+
+	if res and res.stillMuted then
+		self:_mutedRecovery(res)
+	end
 	return false
+end
+
+--[[
+THE ONE BLOCKING SCREEN: the output is muted on purpose and the user cannot be
+expected to work out why.
+
+It reaches here only when a coefficient write failed AND the recovery bypass
+could not be confirmed, so the chip may be holding a partial coefficient set --
+the +42.1 dB intermediate measured on 2026-08-01. Silence is correct; silence
+with no explanation and no way out except a power cycle is not.
+
+⛔ TRY AGAIN RESTORES SOUND ONLY ON A CONFIRMED BYPASS. It re-attempts the bypass
+and unmutes if and only if that is confirmed, which is the same invariant the
+apply path enforces. It must never simply unmute.
+]]
+function _mutedRecovery(self, res)
+	--[[
+	⛔ THE TEXT IS THE MENU'S HEADER WIDGET, NOT A SEPARATE ONE.
+
+	A Textarea added alongside a SimpleMenu competes with it for the window's
+	space and the menu scrolls underneath it -- the same lesson the Level Matching
+	screen already records. As a header it is part of the menu's own layout.
+
+	⛔ AND IT MUST FIT, WITHOUT SCROLLING. Textarea CAN scroll -- it builds a
+	Scrollbar and handles up/down -- so this is a deliberate choice, not a
+	platform limit: someone looking at a silent Radio should not have to scroll to
+	find out why it is silent.
+
+	The budget, from the skin's own constants (HELP_TEXT_FONT_SIZE = 16,
+	HELP_TEXT_PADDING = {10,10,5,8}, LANDSCAPE_LINE_ITEM_HEIGHT = 45):
+
+	  band 240 - 36 - 24        = 180 px
+	  two menu rows at 45       =  90 px  ->  90 left
+	  padding 10 top, 8 bottom  =  72 px for text
+	  lineHeight 16 + 4 = 20    ->  THREE lines, wrapping at 285 px
+
+	(One row would give five, which is where the five-line figure on the Level
+	Matching screen comes from.)
+
+	⚠️ A first pass at this comment read the font size with a regex, got 18, and
+	computed a 22 px lineHeight and a 280 px wrap. Two errors that happened to
+	cancel to the same line count -- and on the way, a correct string was shortened
+	for no reason. The numbers above are the skin's constants, and the wrap was
+	measured on the device with the real face (diag_fit2). The string below is
+	three lines of three.
+	]]
+	local window = Window("text_list", "Equaliser Problem", 'settingstitle')
+
+	local menu = SimpleMenu("menu", {
+		{
+			text     = "Try again",
+			sound    = "WINDOWSHOW",
+			callback = function()
+				local okBypass = false
+				if self.bsp then
+					okBypass = pcall(function()
+						self.bsp:setMixer(A.NAME.enable, A.BYPASS)
+					end)
+				end
+				if not okBypass then
+					log:warn("SBEQ-RECOVER bypass NOT confirmed; staying muted build=", BUILD)
+					return                              -- stay on this screen
+				end
+				-- Confirmed off. Sound may be restored, and the make-up that was
+				-- compensating for the now-absent attenuation must come out.
+				local restored = pcall(function()
+					self.bsp:setMixer(A.MUTE_CTL, A.mutePoint(), A.mutePoint())
+				end)
+				self:_levelMatch(0)
+				self.hwError  = nil
+				self.hwMuted  = false
+				self:storeSettings()
+				log:info("SBEQ-RECOVER bypass confirmed, restored=", tostring(restored),
+				         " build=", BUILD)
+				window:hide()
+			end,
+		},
+		{
+			text     = "Restart the Radio",
+			sound    = "WINDOWSHOW",
+			callback = function()
+				log:warn("SBEQ-RECOVER user chose restart, build=", BUILD)
+				appletManager:callService("reboot")
+			end,
+		},
+	})
+
+	-- Measured at 3 lines of a 3-line budget. Adding a word overflows it;
+	-- re-measure with diag_fit2 if this is ever reworded.
+	menu:setHeaderWidget(Textarea("help_text",
+		"Sound is muted for safety. The equaliser could not be switched off, " ..
+		"so playing audio now could be very loud."))
+
+	window:addWidget(menu)
+	self:tieAndShowWindow(window)
+	return window
 end
 
 --[[
@@ -1602,11 +1745,16 @@ without its compensation, then a bypass, then the general case.
 function _applyFailureText(self, res)
 	res = res or {}
 
-	if res.stillMuted then
-		return "The equaliser could not be set safely, so sound is muted.\n\n" ..
-		       "Restart the Radio to restore audio."
-	end
+	--[[
+	⛔ NO MUTED BRANCH HERE. That state goes to _mutedRecovery, which offers the
+	bypass retry and the restart instead of describing a dead end. This function
+	only ever sees states the user can simply be told about.
 
+	It also removes a real duplicate: the message used to begin "Restart the Radio
+	to restore audio.", of which the recovery screen's menu row "Restart the
+	Radio" is a prefix -- two on-screen strings saying the same thing differently,
+	which is exactly what test_uidupes exists to catch.
+	]]
 	if res.refused then
 		return "This firmware is missing the in-process mixer (baby_bsp), so " ..
 		       "nothing was changed.\n\nThe previous settings are still active."
@@ -1666,7 +1814,16 @@ function resetShow(self, menuItem)
 				The screen is REPLACED by the explanation, so the failure cannot be
 				missed by anyone who does not later open one of the editors.
 				]]
-				local Textarea = require("jive.ui.Textarea")
+				--[[
+				A reset that left the output MUTED goes to the recovery screen,
+				not to a message. That state has actions attached -- try the
+				bypass again, or restart -- and a dead-end explanation was the
+				only thing available before that screen existed.
+				]]
+				if res and res.stillMuted then
+					self:_mutedRecovery(res)
+					return
+				end
 				local w = Window("text_list", "Reset Tone", 'settingstitle')
 				w:addWidget(Textarea("text", self:_applyFailureText(res)))
 				self:tieAndShowWindow(w)
@@ -2101,5 +2258,5 @@ function sbRadioEQApply(self)
 	A.forgetMutePoint()
 	A.mutePoint()
 	self:_design()
-	self:_applyNow(true)
+	self:_applyNow()
 end

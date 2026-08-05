@@ -88,7 +88,10 @@ ok("full apply comfortably under 50 ms", ms * 12 < 50, string.format("%.1f ms", 
 
 print("=== D. restore the 12 dB shelf ===")
 local restore = { N0 = 16514, N1 = -16201, N2 = 15899, D1 = 32328, D2 = -31899 }
-A.apply(restore, restore, false)
+-- The production writer, not the deleted shell path: it keeps the PCM mute
+-- around the bypass window and returns a result instead of throwing.
+A.forgetMutePoint(); A.mutePoint()
+A.applyBSPMuted(bsp, restore, restore, nil, false, false)
 local okr, whyr = A.verify("band1", restore)
 local okr2 = A.verify("band2", restore)
 ok("restored on both sections", okr and okr2 and A.readEnable() == 10, whyr)

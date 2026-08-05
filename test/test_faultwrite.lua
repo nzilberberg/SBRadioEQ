@@ -257,26 +257,17 @@ do
 	end)(), "nothing to write -> ok=true, writes=0")
 end
 
-print("=== the SHELL path reports failure instead of a truthy string ===")
-do
-	local realExecute = A.execute
+--[[
+⛔ THE SHELL SECTION IS GONE, WITH THE PATH IT TESTED.
 
-	A.execute = function() return 1 end                     -- non-zero exit
-	local r = A.apply(c1, c2, false)
-	ok("non-zero exit is a failure", type(r) == "table" and r.ok == false,
-	   type(r) == "table" and tostring(r.error) or type(r) .. " (was: the command string)")
+It stubbed A.execute and asserted that A.apply reported exit status honestly --
+worth having while a second way to write the codec existed. baby_bsp ships with
+every Radio firmware (SqueezeboxBabyApplet requires it, and it is a rootfs file),
+so that path was unreachable and has been deleted. There is one writer now.
 
-	A.execute = function() error("amixer missing", 0) end   -- throws
-	r = A.apply(c1, c2, false)
-	ok("a throwing execute is a failure", type(r) == "table" and r.ok == false,
-	   type(r) == "table" and tostring(r.error) or type(r))
-
-	A.execute = function() return 0 end                     -- success
-	r = A.apply(c1, c2, false)
-	ok("exit 0 is a success", type(r) == "table" and r.ok == true, "")
-
-	A.execute = realExecute
-end
+The property those assertions protected -- a failed write must never be reported
+as success -- is covered above, on the path that actually runs.
+]]
 
 --[[
 NEGATIVE CONTROL. The old implementation is reproduced exactly. If these
@@ -297,12 +288,11 @@ do
 	ok("old mute path leaves the device MUTED", restoreWrites(s) == 0,
 	   "restore never reached")
 
-	local function oldApply() local cmd = "amixer ..." ; return cmd end
-	local r = oldApply()
-	ok("old shell path returns a truthy string, not a result",
-	   type(r) == "string" and r and true, "any caller reads this as success")
-
-	assert(not okCall and restoreWrites(s) == 0 and type(oldApply()) == "string",
+	-- The old shell-path control went with the shell path. Its `assert` clause
+	-- referenced the local it defined, so removing one without the other would
+	-- have thrown here -- losing this file's summary line and reporting a
+	-- traceback instead of a verdict.
+	assert(not okCall and restoreWrites(s) == 0,
 	       "negative control did not fire: these tests would pass on the old code")
 end
 

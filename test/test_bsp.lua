@@ -68,7 +68,10 @@ ok("BSP is usable for live updates (10 writes < 100 ms)", bspMs * 10 < 100,
 
 print("=== E. restore the 12 dB shelf ===")
 local restore = { N0 = 16514, N1 = -16201, N2 = 15899, D1 = 32328, D2 = -31899 }
-A.apply(restore, restore, false)
+-- The production writer, not the deleted shell path: it keeps the PCM mute
+-- around the bypass window and returns a result instead of throwing.
+A.forgetMutePoint(); A.mutePoint()
+A.applyBSPMuted(bsp, restore, restore, nil, false, false)
 local okr, whyr = A.verify("band1", restore)
 ok("restored", okr and A.readEnable() == 10, whyr .. " enable=" .. tostring(A.readEnable()))
 

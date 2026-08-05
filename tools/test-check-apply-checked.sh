@@ -80,7 +80,7 @@ echo ""
 echo "the gate must REFUSE rather than report clean:"
 
 fixture "renamed _applyNow aborts (does not pass)" 2 \
-	"sed -i 's/^function _applyNow(self, allowShell)/function _commitToHardware(self, allowShell)/' $APPLET"
+	"sed -i 's/^function _applyNow(self)/function _commitToHardware(self)/' $APPLET"
 
 tmp=$(mktemp -d)
 mkdir -p "$tmp/tools"
