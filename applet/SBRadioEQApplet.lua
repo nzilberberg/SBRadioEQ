@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 68
+local BUILD = 69
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -536,17 +536,48 @@ function _levelMatch(self, target)
 	(safe, but not what was asked); failing to go DOWN leaves old make-up over
 	less attenuation, which is the loud state and must not be unmuted into.
 	]]
+	--[[
+	⛔ THE FLOOR IS DECIDED BY WHERE THE MOVE LANDS, NOT WHERE IT STARTED.
+
+	Compensation the control cannot represent below its own floor is discarded --
+	appliedAtten becomes the target, the books match the real volume, and turning
+	the volume up afterwards starts from a clean slate. Carrying the remainder
+	instead leaves a number that can never be reconciled: every later delta is
+	computed from make-up that is not there.
+
+	This was first written inside the "the volume did not move" branch, which
+	only catches a move that STARTS at zero. A move that starts above zero and
+	CLAMPS to it took the ordinary path, recorded only the dB it managed before
+	hitting the floor, and returned success with the rest stranded -- measured at
+	12.60 dB left behind from volume 5 with 20 dB to remove. Same policy, half
+	implemented, because the test had been written from the code path rather than
+	from the policy.
+
+	Checking the RESULT covers both: a move already at the floor cannot land
+	anywhere else.
+	]]
+	if U.floorDiscards(delta, newVol) then
+		if newVol ~= cur then player:volume(newVol, true) end
+		s.appliedAtten = target
+		return { ok = true, fullyMatched = true,
+		         reason         = "volume reached minimum; residue discarded",
+		         requestedDelta = delta,
+		         requestedAtten = target,
+		         achievedAtten  = target,
+		         appliedAtten   = target }
+	end
+
 	if newVol == cur then
-		local stuckUp   = (delta > 0 and cur >= 100)
-		local stuckDown = U.floorDiscards(delta, cur)
+		local stuckUp = (delta > 0 and cur >= 100)
 		--[[
 		⛔ STUCK GOING UP IS SUCCESS. It is the whole point of best-effort level
 		matching: the volume gave everything it had, the EQ is applied as asked,
 		and the result is quieter by the remainder. Reporting ok=false here is
 		what put an error screen in front of a perfectly good curve.
 
-		Stuck going DOWN is the opposite and keeps ok=false: attenuation has
-		dropped and the make-up compensating for it could not be taken out.
+		The downward equivalent never reaches here -- the floor branch above
+		claims it, because a downward move that cannot complete has a defined
+		answer rather than a failure.
 		]]
 		if stuckUp then
 			return { ok = true, fullyMatched = false,
@@ -555,33 +586,6 @@ function _levelMatch(self, target)
 			         requestedAtten = target,
 			         achievedAtten  = applied,
 			         appliedAtten   = applied }
-		end
-		--[[
-		⛔ THE VOLUME FLOOR ABSORBS WHAT IS LEFT. Do not carry a residue.
-
-		Reachable: level matching raises the volume for a big boost, the user
-		then turns the volume down by hand, and then bypasses or resets. The
-		downward move needs to go below zero, and dbToVolume floors at 0.
-
-		Reporting that as a failure was worse than the state it described. The
-		transaction holds the mute on a failed downward move -- correctly, since
-		that normally means make-up standing over reduced attenuation -- but here
-		the volume is already at the floor, so there is nothing to be loud WITH,
-		and Try again can never succeed because no further reduction exists. A
-		recovery path that cannot recover.
-
-		Compensation below the control's own floor has no recoverable meaning, so
-		it is discarded: appliedAtten becomes the target, the books match the real
-		volume again, and raising the volume afterwards starts from a clean slate.
-		]]
-		if stuckDown then
-			s.appliedAtten = target
-			return { ok = true, fullyMatched = true,
-			         reason         = "volume at minimum; residue discarded",
-			         requestedDelta = delta,
-			         requestedAtten = target,
-			         achievedAtten  = target,
-			         appliedAtten   = target }
 		end
 		return { ok = true, noop = true, reason = "quantises to the same volume",
 		         requestedDelta = delta, appliedAtten = applied }

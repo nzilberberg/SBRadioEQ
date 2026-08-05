@@ -47,9 +47,18 @@ local function levelMatch(st, target)
 	if not delta then return end
 	local fromDb = D.volumeToDb(st.volume)
 	local newVol = D.dbToVolume(fromDb + delta)
-	-- The same decision production makes, from the same function: at the floor a
-	-- downward move cannot complete and the residue is discarded.
-	if U.floorDiscards(delta, st.volume) then st.applied = target; return end
+	-- The same decision production makes, from the same function, and keyed on
+	-- where the move LANDS -- a move that starts above zero and clamps to it must
+	-- discard its residue exactly like one that started there.
+	if U.floorDiscards(delta, newVol) then
+		if newVol ~= st.volume then
+			st.truth  = st.truth + (D.volumeToDb(newVol) - fromDb)
+			st.volume = newVol
+		end
+		st.applied = target
+		st.truth   = target          -- the floor absorbed the rest; books agree
+		return
+	end
 	if newVol == st.volume then return end
 	local toDb = D.volumeToDb(newVol)
 	st.volume  = newVol
@@ -265,7 +274,31 @@ also stayed permanently wrong.
 So the floor discards it: appliedAtten becomes the target and the accounting
 matches the real volume again.
 ]]
-print("=== a downward move that hits volume zero discards the residue ===")
+print("=== a downward move that LANDS on volume zero discards the residue ===")
+do
+	--[[
+	The case the first version of this test missed. It set the volume to 0 before
+	reconciling, so it only ever exercised a move that STARTED at the floor -- the
+	one branch that had been implemented. A move that starts above zero and clamps
+	to it took the ordinary path and stranded what it could not remove.
+
+	Written from the POLICY (compensation below the floor is discarded) rather
+	than from the code path, this is the case that falls out first.
+	]]
+	local st = newState(40)
+	levelMatch(st, 15.0)                       -- volume climbs to pay for a boost
+	st.volume = 5                              -- the user turns it right down
+
+	levelMatch(st, 0)                          -- bypass: remove all of it
+
+	ok("the volume reaches the floor", st.volume == 0, tostring(st.volume))
+	ok("appliedAtten reaches the target, not a residue", math.abs(st.applied) < 0.01,
+	   string.format("applied %.2f", st.applied))
+	ok("the books agree with the real volume", drift(st) < 0.01,
+	   string.format("drift %.3f", drift(st)))
+end
+
+print("=== a downward move that STARTS at volume zero does the same ===")
 do
 	local st = newState(40)
 	levelMatch(st, 15.0)                       -- a +15 curve, volume climbs

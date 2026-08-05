@@ -160,11 +160,18 @@ wrong here, because at the floor there is nothing to be loud with and no further
 reduction left to retry. It also left the bookkeeping permanently disagreeing
 with the real volume.
 
+⛔ THE ARGUMENT IS WHERE THE MOVE LANDS, NOT WHERE IT STARTED. Passing the
+CURRENT volume only catches a move that begins at zero; one that begins above it
+and clamps down took the ordinary path and stranded whatever it could not remove
+-- measured at 12.60 dB left behind from volume 5 with 20 dB to take out. Same
+policy, half applied. The resulting volume covers both, because a move already at
+the floor cannot land anywhere else.
+
 This lives here rather than in the applet so the bench can exercise the same
 decision production makes; the applet cannot be loaded outside Jive.
 ]]
-function M.floorDiscards(delta, curVolume)
-	return (delta or 0) < 0 and (curVolume or 0) <= 0
+function M.floorDiscards(delta, resultingVolume)
+	return (delta or 0) < 0 and (resultingVolume or 0) <= 0
 end
 
 function M.shortfallDb(requiredDb, budgetDb)
