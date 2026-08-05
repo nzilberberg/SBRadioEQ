@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 61
+local BUILD = 68
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -1340,6 +1340,7 @@ function menuShow(self, menuItem)
 	local okbsp, bsp = pcall(require, "baby_bsp")
 	self.bsp = okbsp and bsp or nil
 	self:_design()
+	self:_syncHwState()   -- the marker must describe the CHIP, not a stale flag
 
 	--[[
 	1. Tone Control -- THE bypass toggle.
@@ -1632,6 +1633,46 @@ the detail in syslog.
 
 Returns true when the apply succeeded, so a caller can still decline to close.
 ]]
+--[[
+⛔ ON ENTRY, ASK THE CHIP -- DO NOT TRUST A REMEMBERED FLAG.
+
+hwError is set when an apply FAILS. Screens only design on entry, they do not
+re-apply, so opening one showed whatever flag happened to be left on the applet
+object. After a failed apply at startup that meant the screen could draw an
+enabled curve, with the checkbox on, over a codec running no filter at all --
+the settings say what was ASKED FOR, and nothing on screen said it had not
+happened.
+
+Settings are deliberately not reset by a failure: they are the desired tone, and
+discarding them over one bad write would lose the user's tuning to a transient
+fault. What has to be true is that the SCREEN does not assert a filter the
+hardware is not running.
+
+So compare what the settings ask for against what the chip reports, and set or
+clear the marker from that. A chip that cannot be asked (nil) is left alone --
+it is not evidence of either state.
+]]
+function _syncHwState(self)
+	local state = A.enableStateBSP(self.bsp)
+	if state == nil then return end
+
+	local s        = self:getSettings()
+	local wantOff  = (not s.enabled) or (s.bassGain == 0 and s.trebGain == 0)
+	local isOff    = (state == A.BYPASS)
+
+	if wantOff == isOff then
+		-- The hardware is doing what the settings ask. Any error flag left over
+		-- from an earlier attempt no longer describes anything.
+		self.hwError = nil
+		self.hwMuted = false
+	elseif not self.hwError then
+		self.hwError = isOff and "the filter is not running"
+		                      or "the filter is running unexpectedly"
+		log:warn("SBEQ-DRIFT settings want ", wantOff and "bypass" or "filter",
+		         " chip reports ", tostring(state), " build=", BUILD)
+	end
+end
+
 function _reportApply(self, res, title)
 	if res and res.ok then return true end
 
@@ -1718,7 +1759,15 @@ function _mutedRecovery(self, res)
 				if retry and retry.ok then
 					self:storeSettings()
 					log:info("SBEQ-RECOVER retry applied cleanly, build=", BUILD)
+					--[[
+					Land on the Tone menu, not on whatever happened to be
+					underneath. This screen can be raised from startup, where
+					there is nothing behind it worth returning to, and the user
+					arrived here because the equaliser was in trouble -- the
+					menu that owns it is where they were trying to get.
+					]]
 					window:hide()
+					self:menuShow()
 					return
 				end
 				log:warn("SBEQ-RECOVER retry failed err=", tostring(retry and retry.error),
@@ -1755,9 +1804,50 @@ function _mutedRecovery(self, res)
 		unmute  = "The equaliser is set correctly, but the sound could not be " ..
 		          "turned back on. Try again should restore it.",
 	}
-	menu:setHeaderWidget(Textarea("help_text", TEXT[why] or TEXT.unknown))
+	local header = Textarea("help_text", TEXT[why] or TEXT.unknown)
+	menu:setHeaderWidget(header)
 
 	window:addWidget(menu)
+
+	--[[
+	⛔ BACK DOES NOT DISMISS THIS SCREEN.
+
+	Everywhere else in the applet Back means "leave without changing anything",
+	which is right when leaving costs nothing. Here it cost the entire point: the
+	output is muted deliberately, and popping the window returns the user to a
+	Radio that is silent with nothing left on screen explaining why. Shown after
+	startup there may be nothing behind it at all.
+
+	This does not trap anyone. Both exits are on the screen, and Restart always
+	works -- a power cycle resets the codec's volatile registers to their
+	defaults, which is a known-safe state. What Back would offer is not an escape
+	from the silence, only the loss of the explanation for it.
+
+	⛔ THE REFUSAL MUST BE VISIBLE, AND IT CANNOT BE AUDIBLE.
+
+	Swallowing the keypress silently is not enough. A control that appears to do
+	nothing reads as a FROZEN DEVICE, and someone already looking at a silent
+	Radio will conclude it has crashed -- worse than the state being explained.
+
+	The platform's usual answer for a refused key is the BUMP sound effect. It is
+	no use here: sound effects go through the same DAC this screen has muted, so
+	it would be inaudible precisely when it is needed. The feedback has to be on
+	the screen.
+
+	So Back rewrites the explanation to name the two ways out. Something visibly
+	changes, and what it changes to is the answer to the question the user was
+	asking by pressing Back.
+	]]
+	window:addListener(EVENT_KEY_PRESS, function(event)
+		if event:getKeycode() == KEY_BACK then
+			header:setValue("Sound stays off until this is fixed. " ..
+			                "Use Try again, or Restart the Radio.")
+			log:info("SBEQ-RECOVER back refused; output is still muted, build=", BUILD)
+			return EVENT_CONSUME
+		end
+		return EVENT_UNUSED
+	end)
+
 	self:tieAndShowWindow(window)
 	return window
 end
@@ -1909,6 +1999,7 @@ function toneShow(self, menuItem)
 	A.mutePoint()
 
 	self:_design()
+	self:_syncHwState()   -- the marker must describe the CHIP, not a stale flag
 
 	self.canvas = Canvas('debug_canvas', function(srf) self:_redrawTone(srf) end)
 
@@ -2093,6 +2184,7 @@ function settingsShow(self, menuItem)
 	A.mutePoint()
 
 	self:_design()
+	self:_syncHwState()   -- the marker must describe the CHIP, not a stale flag
 
 	self.canvas = Canvas('debug_canvas', function(srf) self:_redraw(srf) end)
 
@@ -2296,5 +2388,34 @@ function sbRadioEQApply(self)
 	A.forgetMutePoint()
 	A.mutePoint()
 	self:_design()
-	self:_applyNow()
+	local res = self:_applyNow()
+
+	--[[
+	⛔ A RADIO THAT BOOTS SILENT MUST SAY WHY.
+
+	If the startup apply leaves the output muted on purpose -- the filter cannot
+	be vouched for, so playing audio could be very loud -- then discarding this
+	result gives the user a Radio that is simply silent, with nothing on screen
+	and no obvious remedy. That is the one failure nobody can diagnose. Every
+	other outcome here is safe and belongs in syslog.
+
+	DEFERRED, not immediate. Measured on the device: a window shown directly from
+	the startup service is created without error and is then replaced by the
+	normal boot screens, so it never reaches the user. The same window on a short
+	Timer survives and stays up -- verified by reading the framebuffer back, which
+	showed the deferred window and not the immediate one. This is also how the
+	platform's own resident applets present things after startup rather than
+	during it.
+
+	The delay only has to outlast the boot screens; it is not a race to win,
+	because nothing else will replace this window once the device settles.
+	]]
+	if res and res.stillMuted then
+		log:warn("SBEQ-BOOT left the output MUTED reason=",
+		         tostring(res.mutedReason), " build=", BUILD)
+		local t = Timer(8000, function()
+			pcall(function() self:_mutedRecovery(res) end)
+		end, true)
+		t:start()
+	end
 end

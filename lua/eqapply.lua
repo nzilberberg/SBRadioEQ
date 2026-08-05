@@ -350,9 +350,32 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass, reconcile)
 	not found") and returns nil on success, so pcall is the right instrument --
 	there is no status value to inspect.
 	]]
+	--[[
+	⛔ CONFIRM BY READING THE CHIP, NOT BY THE ABSENCE OF AN EXCEPTION.
+
+	setMixer returns no status on success, and a driver-level rejection appears
+	to be silent, so "the bypass call did not throw" is weaker evidence than it
+	looks. getMixer answers the actual question -- is the filter off? -- in
+	process, at the same cost as a write.
+
+	This matters most at STARTUP. The codec's registers are volatile: after a
+	power cycle the filter is already bypassed and the coefficients are driver
+	defaults. So a write that fails at boot usually leaves the chip in exactly
+	the state we would have forced it into anyway. Inferring "unknown" there and
+	holding the mute produced a Radio that booted silent for no reason -- and
+	whose only offered remedy, a restart, returned it to the same place.
+
+	Reading turns that into a fact: bypassed means safe, and safe means the
+	output can be restored.
+	]]
 	local safeBypassed = nil
 	if not okWrite then
 		safeBypassed = pcall(function() bsp:setMixer(M.NAME.enable, M.BYPASS) end)
+
+		local okRead, enable = pcall(function() return bsp:getMixer(M.NAME.enable) end)
+		if okRead then
+			safeBypassed = (enable == M.BYPASS)
+		end
 	end
 
 	--[[
@@ -508,6 +531,24 @@ function M.readBand(which)
 		c[k] = M.toSigned(M.swap16(raw))
 	end
 	return c
+end
+
+--[[
+Ask the chip whether the filter is running, in process.
+
+M.readEnable below does the same thing through amixer, which costs a process
+spawn -- fine for a test, wrong for anything a screen does on entry. This is the
+same read the apply path uses to confirm a bypass, and it is what lets a screen
+report what the hardware IS doing rather than what the applet last assumed.
+
+Returns M.BYPASS, M.ENABLE_BOTH, or nil when the chip cannot be asked. nil is a
+third answer, not a failure: a caller must not read it as "bypassed".
+]]
+function M.enableStateBSP(bsp)
+	if not bsp then return nil end
+	local ok, v = pcall(function() return bsp:getMixer(M.NAME.enable) end)
+	if not ok then return nil end
+	return v
 end
 
 function M.readEnable()

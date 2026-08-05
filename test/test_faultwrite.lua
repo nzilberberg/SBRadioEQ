@@ -33,11 +33,24 @@ local function ok(name, cond, detail)
 end
 
 --[[
-A stub that records every write and throws on the Nth one. failAt = 0 never
-throws, which gives the control case.
+A stub that throws on the Nth write; failAt = 0 never throws, which gives the
+control case.
+
+It also MODELS the enable register, it does not merely record writes.
+
+applyBSPMuted decides whether the filter is safely off by READING it back --
+setMixer reports nothing on success and a driver-level rejection appears to be
+silent, so "the call did not throw" is weaker evidence than a readback. A stub
+without getMixer would make that path fall back to the weaker inference and the
+tests would never exercise what production actually does.
+
+`enable` starts at ENABLE_BOTH: the filter is RUNNING when these sequences
+begin, which is the state the bracket exists to protect. A write that throws
+never reaches the register, so a permanently broken enable control leaves it
+running -- and the readback then correctly reports the filter as unsafe.
 ]]
-local function stub(failAt, failAlwaysOn)
-	local s = { seq = {}, n = 0 }
+local function stub(failAt, failAlwaysOn, initialEnable)
+	local s = { seq = {}, n = 0, enable = initialEnable or A.ENABLE_BOTH }
 	function s:setMixer(name, a, b)
 		s.n = s.n + 1
 		s.seq[#s.seq + 1] = { name = name, a = a, n = s.n }
@@ -49,6 +62,11 @@ local function stub(failAt, failAlwaysOn)
 		if failAt and failAt > 0 and s.n == failAt then
 			error("injected mixer fault at write " .. s.n, 0)
 		end
+		if name == A.NAME.enable then s.enable = a end
+	end
+	function s:getMixer(name)
+		if name == A.NAME.enable then return s.enable end
+		return nil
 	end
 	return s
 end
@@ -239,6 +257,36 @@ do
 	   t.stillMuted == true and restoreWrites(s) == 0,
 	   string.format("stillMuted=%s, restore writes=%d",
 	                 tostring(t.stillMuted), restoreWrites(s)))
+end
+
+--[[
+THE STARTUP CASE: a failed write with the filter already OFF is not a fault
+worth silencing the Radio for.
+
+The codec's registers are volatile, so after a power cycle the filter is
+bypassed and the coefficients are driver defaults. If the boot-time apply then
+fails, the chip is sitting in exactly the state a recovery would have forced it
+into. Inferring "unknown" there produced a Radio that booted silent for no
+reason -- and the only remedy it offered, a restart, returned it to the same
+screen. A loop with no exit.
+
+Reading the enable register turns the guess into a fact.
+]]
+print("=== a failed write with the filter already OFF stays audible ===")
+do
+	A.forgetMutePoint(); A.mutePoint()
+	-- The filter is bypassed before we start, as it is at every boot, and the
+	-- enable control is broken so the recovery write cannot change it.
+	local s = stub(0, A.NAME.enable, A.BYPASS)
+	local _, res = pcall(A.applyBSPMuted, s, d1, d2, PREV, false, false)
+	local t = (type(res) == "table") and res or {}
+
+	ok("the readback confirms the filter is off", t.safeBypassed == true,
+	   "safeBypassed=" .. tostring(t.safeBypassed))
+	ok("so the hardware state is NOT unknown", t.hardwareStateUnknown == false,
+	   "hardwareStateUnknown=" .. tostring(t.hardwareStateUnknown))
+	ok("and the Radio is NOT left silent", t.stillMuted ~= true,
+	   "stillMuted=" .. tostring(t.stillMuted))
 end
 
 print("=== a clean run still reports ok=true and writes ===")
