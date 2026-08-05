@@ -31,7 +31,7 @@ SBRADIOEQ_LEVEL_MATCHING
 #   AS YOU ADJUST -- the matching is live, on every detent, not on save.
 #   the EFFECT -- what the listener notices is that loudness does NOT change.
 SBRADIOEQ_LEVEL_MATCH_DESC
-	EN	As you adjust bass or treble, Level Matching moves the volume up or down to match, so the tone changes without the music getting louder or quieter.
+	EN	As you adjust tone, Level Matching moves the volume to compensate. If the volume runs out of room, the EQ still applies and may sound quieter.
 
 SBRADIOEQ_RESET
 	EN	Reset Tone

@@ -194,6 +194,50 @@ else
 	bad=$((bad + 1))
 fi
 
+# --- F. ONE OWNER for the codec controls ------------------------------------
+#
+# ⛔⛔ THE RULE ABOVE IS PER-FUNCTION, AND THAT IS NOT ENOUGH ON ITS OWN.
+#
+# Checks A-E inspect _applyNow by name. The ordering they protect -- mute, write
+# the filter, reconcile the player volume WHILE STILL MUTED, unmute last -- is a
+# property of the SEQUENCE, not of that function's name, so any second piece of
+# code that drives the mixer directly is invisible to them and free to get the
+# order wrong. That is not hypothetical: a recovery action written outside
+# _applyNow unmuted first and lowered the volume afterwards, which is precisely
+# the state the ordering exists to prevent, and every check above stayed green.
+#
+# So the applet does not touch codec controls at all. It calls the apply
+# transaction; eqapply owns setMixer, the mute control and the enable bit. A UI
+# file reaching for a mixer is the defect class, whatever order it happens to use.
+# A comment-stripped view: this file's own prose names setMixer and MUTE_CTL when
+# explaining why they belong in eqapply, and a check that reads its own
+# explanation reports a defect that is not there.
+#
+# ⛔ AND IT MUST NOT BE EMPTY. The first version of this check referenced a
+# variable that was never assigned, so it grepped an empty string, found nothing
+# and printed "ok" -- a gate that passes because it reads nothing is worse than
+# no gate, because the green is believed.
+codeNC=$(awk '/^[[:space:]]*--\[\[/{inc=1} !inc{print} /^[[:space:]]*\]\]/{inc=0}' "$APPLET" \
+	| sed 's/--.*$//')
+[ -n "$codeNC" ] || {
+	echo "FAIL(2): the comment-stripped applet view is empty -- this check would"
+	echo "         pass by reading nothing."
+	exit 2
+}
+
+appletMixer=$(printf '%s\n' "$codeNC" \
+	| grep -nE ':setMixer\(|MUTE_CTL|NAME\.enable' || true)
+
+if [ -z "$appletMixer" ]; then
+	echo "  ok   the applet drives no codec control directly"
+else
+	echo "FAIL: the applet writes codec controls itself:"
+	printf '%s\n' "$appletMixer" | sed 's/^/        /'
+	echo "      Mute, enable and coefficients belong to eqapply's transaction,"
+	echo "      which is the only place their ORDER is guaranteed."
+	bad=$((bad + 1))
+fi
+
 echo ""
 if [ "$bad" -eq 0 ]; then
 	echo "check-apply-checked: a failed apply is unwound and visible"

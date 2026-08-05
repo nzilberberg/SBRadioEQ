@@ -418,27 +418,47 @@ function M.applyBSPMuted(bsp, c1, c2, prev, bypass, prevBypass, reconcile)
 		end
 	end
 
+	--[[
+	⛔ SILENCE HAS THREE DIFFERENT CAUSES AND THEY NEED DIFFERENT ANSWERS.
+
+	`stillMuted` alone says only that the output is off. A caller that treats all
+	three the same tells the user the filter could not be switched off when in two
+	of the cases it went in perfectly, and offers to bypass a filter that is
+	already correct. `mutedReason` names which one:
+
+	  "unknown"  a coefficient write failed AND the recovery bypass could not be
+	             confirmed. The chip may hold a partial coefficient set, whose
+	             numerator no longer cancels its own denominator -- the case that
+	             measures ~+42 dB. Nothing may be unmuted into this.
+	  "volume"   the filter is exactly as requested, but the player volume could
+	             not be brought DOWN to match it. Unmuting would play the old,
+	             larger make-up over the new, smaller attenuation.
+	  "unmute"   the filter and the volume are both correct; only restoring the
+	             PCM volume failed. Nothing is wrong except the silence itself.
+	]]
 	if not okWrite then
+		local why = "unknown"
+		if safeBypassed then
+			if not mayUnmute then why = "volume" else why = "unmute" end
+		end
 		return { ok = false, writes = 0, error = tostring(n),
 		         safeBypassed = safeBypassed,
 		         reconciled = reconciled,
 		         hardwareStateUnknown = not safeBypassed,
 		         stillMuted = holdMute or (not okRestore),
+		         mutedReason = why,
 		         restored = okRestore }
 	end
 	if holdMute then
-		-- The filter went in correctly, but the volume could not be brought down
-		-- to match it. Unmuting would play the old make-up over the new, smaller
-		-- attenuation. Stay silent and say so.
 		return { ok = false, writes = n, error = "volume not reconciled",
 		         reconciled = reconciled, stillMuted = true,
+		         mutedReason = "volume",
 		         hardwareStateUnknown = false }
 	end
 	if not okRestore then
-		-- Wrote fine but the device is still muted: report it so the caller can
-		-- tell the user, rather than leaving them with silent hardware.
 		return { ok = false, writes = n, error = "mute was not restored",
-		         stillMuted = true, hardwareStateUnknown = false }
+		         stillMuted = true, mutedReason = "unmute",
+		         hardwareStateUnknown = false }
 	end
 	-- `reconciled` must be reported on the SUCCESS path too, not only on failures:
 	-- _applyNow uses it to decide whether the volume still needs moving, so a nil

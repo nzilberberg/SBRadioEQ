@@ -202,7 +202,7 @@ graph shows it honestly rather than hiding it.
 
 ## Status
 
-Working and in daily use. Latest release v0.2.4; installable from the catalog URL above. Not listed
+Working and in daily use. Latest release v0.2.7; installable from the catalog URL above. Not listed
 in the central LMS plugin repository — that would be a pull request to
 `lms-community/lms-plugin-repository`, and it has not been made.
 
@@ -236,9 +236,6 @@ Known gaps, in the order they matter:
 
 - **Headphone insertion and removal are untested** — see the endpoint note below. That is the one
   remaining path where the loud mismatch could occur without any edit of yours.
-- The **shell fallback** has no PCM mute bracket, so with make-up active it could expose bypassed
-  audio at the compensated volume for about a second. It is now reachable **only from the boot-time
-  re-apply**, where nothing is playing; every interactive route fails closed without `baby_bsp`.
 - The endpoint-change case is untested: `SqueezeboxBabyApplet` rewrites codec state on headphone
   insert and on power transitions, which MAY drop the filter -- untested, and a hypothesis rather
   than a confirmed defect. An LMS power off/on transition WAS measured and leaves the filter

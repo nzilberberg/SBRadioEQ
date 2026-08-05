@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 58
+local BUILD = 59
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -669,8 +669,8 @@ function _applyNow(self)
 		self.hwError = nil
 		self.hwMuted = false
 		-- Only when the muted path did not already do it: the no-op early returns
-		-- and the shell fallback never take the callback. Calling twice would
-		-- compute a second delta against an appliedAtten the first call moved.
+		-- never take the callback. Calling twice would compute a second delta
+		-- against an appliedAtten the first call already moved.
 		--[[
 		⛔ A VOLUME-ONLY CHANGE CAN FAIL WHILE THE HARDWARE SUCCEEDS.
 
@@ -1322,10 +1322,9 @@ function menuShow(self, menuItem)
 	local menu   = SimpleMenu("menu")
 
 	-- The toggle below writes coefficients, so the mixer and a designed pair
-	-- have to exist first. NOT fail-closed here, unlike the two editors: this
-	-- menu is still useful without baby_bsp (the Equalizer row does its own
-	-- check on entry), and a one-off bypass toggle can afford the ~1 s shell
-	-- fallback. A knob path cannot, which is why those screens refuse.
+	-- have to exist first. The editors refuse to open without baby_bsp; this
+	-- menu still builds, and a toggle attempted without the mixer simply reports
+	-- that it could not be applied rather than pretending it was.
 	local okbsp, bsp = pcall(require, "baby_bsp")
 	self.bsp = okbsp and bsp or nil
 	self:_design()
@@ -1680,29 +1679,36 @@ function _mutedRecovery(self, res)
 		{
 			text     = "Try again",
 			sound    = "WINDOWSHOW",
+			--[[
+			⛔ RECOVERY RE-RUNS THE ORDINARY TRANSACTION. IT DOES NOT DRIVE THE
+			CODEC ITSELF.
+
+			The mute, the enable bit and the player volume have to move in one
+			fixed order, and only _applyNow -> applyBSPMuted knows it: mute, write
+			the filter, reconcile the volume WHILE STILL MUTED, unmute last. Any
+			second implementation of that sequence is a second place for the order
+			to be wrong, and the order is what stands between a recovery and up to
+			~34 dB of stale make-up landing on unattenuated audio.
+
+			So this button asks for exactly what the user originally wanted -- the
+			current desired curve, applied properly -- and reads the one result.
+			Success closes the screen; anything else leaves it open with the state
+			_applyNow has already recorded. Nothing here touches a mixer control,
+			clears an error flag, or decides the output is safe to unmute.
+			]]
 			callback = function()
-				local okBypass = false
-				if self.bsp then
-					okBypass = pcall(function()
-						self.bsp:setMixer(A.NAME.enable, A.BYPASS)
-					end)
+				local retry = self:_applyNow()
+				if retry and retry.ok then
+					self:storeSettings()
+					log:info("SBEQ-RECOVER retry applied cleanly, build=", BUILD)
+					window:hide()
+					return
 				end
-				if not okBypass then
-					log:warn("SBEQ-RECOVER bypass NOT confirmed; staying muted build=", BUILD)
-					return                              -- stay on this screen
-				end
-				-- Confirmed off. Sound may be restored, and the make-up that was
-				-- compensating for the now-absent attenuation must come out.
-				local restored = pcall(function()
-					self.bsp:setMixer(A.MUTE_CTL, A.mutePoint(), A.mutePoint())
-				end)
-				self:_levelMatch(0)
-				self.hwError  = nil
-				self.hwMuted  = false
-				self:storeSettings()
-				log:info("SBEQ-RECOVER bypass confirmed, restored=", tostring(restored),
+				log:warn("SBEQ-RECOVER retry failed err=", tostring(retry and retry.error),
+				         " stillMuted=", tostring(retry and retry.stillMuted),
 				         " build=", BUILD)
-				window:hide()
+				-- Stay on this screen. _applyNow has set hwError/hwMuted to match
+				-- whatever the hardware is now doing.
 			end,
 		},
 		{
@@ -1715,11 +1721,24 @@ function _mutedRecovery(self, res)
 		},
 	})
 
-	-- Measured at 3 lines of a 3-line budget. Adding a word overflows it;
-	-- re-measure with diag_fit2 if this is ever reworded.
-	menu:setHeaderWidget(Textarea("help_text",
-		"Sound is muted for safety. The equaliser could not be switched off, " ..
-		"so playing audio now could be very loud."))
+	--[[
+	The explanation matches WHY the output is silent. Saying "the equaliser could
+	not be switched off" when the filter went in perfectly and only the unmute
+	failed sends the reader after the wrong thing entirely.
+
+	Each string is measured against the 3-line budget above; adding a word
+	overflows it. Re-measure with diag_fit2 if any is reworded.
+	]]
+	local why  = (res and res.mutedReason) or "unknown"
+	local TEXT = {
+		unknown = "Sound is muted for safety. The equaliser could not be " ..
+		          "switched off, so playing audio now could be very loud.",
+		volume  = "Sound is muted for safety. The volume could not be lowered " ..
+		          "to match the equaliser.",
+		unmute  = "The equaliser is set correctly, but the sound could not be " ..
+		          "turned back on. Try again should restore it.",
+	}
+	menu:setHeaderWidget(Textarea("help_text", TEXT[why] or TEXT.unknown))
 
 	window:addWidget(menu)
 	self:tieAndShowWindow(window)
@@ -1848,8 +1867,7 @@ function toneShow(self, menuItem)
 	self.fontVal   = Font:load("fonts/FreeSansBold.ttf", 15)
 
 	-- Fail closed exactly as the EQ screen does: this screen writes coefficients
-	-- on every detent through the same path, so the amixer fallback would stall
-	-- the UI for about a second per click here too.
+	-- on every detent, and baby_bsp is the only writer there is.
 	local okbsp, bsp = pcall(require, "baby_bsp")
 	self.bsp = okbsp and bsp or nil
 	if not self.bsp then
@@ -2012,12 +2030,12 @@ function settingsShow(self, menuItem)
 	--[[
 	FAIL CLOSED WITHOUT baby_bsp.
 
-	The in-process BSP write is ~20 ms for a full apply. The amixer fallback is
-	about 1.1 SECONDS, because every coefficient costs a process spawn -- and
-	_applyNow runs on every knob detent, so the fallback would stall the UI and
-	starve the audio decoder for roughly a second per click. It also cannot
-	report failure usefully, which is how a failed write used to raise the
-	volume.
+	The in-process BSP write is ~20 ms for a full apply, and _applyNow runs on
+	every knob detent. baby_bsp is the ONLY writer -- the amixer path that once
+	stood behind it is gone, because SqueezePlay's own Radio applet requires the
+	module and it ships in the firmware, so a Radio without it is not a working
+	Radio. Refusing here is a cheap assertion that fails safely, not a fallback
+	decision.
 
 	It was selected SILENTLY when the module was missing, so a firmware without
 	it would present a control that looks fine and behaves terribly. Refuse
