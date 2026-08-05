@@ -47,6 +47,9 @@ local function levelMatch(st, target)
 	if not delta then return end
 	local fromDb = D.volumeToDb(st.volume)
 	local newVol = D.dbToVolume(fromDb + delta)
+	-- The same decision production makes, from the same function: at the floor a
+	-- downward move cannot complete and the residue is discarded.
+	if U.floorDiscards(delta, st.volume) then st.applied = target; return end
 	if newVol == st.volume then return end
 	local toDb = D.volumeToDb(newVol)
 	st.volume  = newVol
@@ -242,6 +245,47 @@ do
 	   string.format("applied %.2f, target 2.0", st.applied))
 	ok("the books agree after recovery", drift(st) < 0.01,
 	   string.format("drift %.3f", drift(st)))
+end
+
+
+--[[
+THE VOLUME FLOOR ABSORBS THE REMAINDER.
+
+Reachable without anything failing: level matching raises the volume to pay for a
+big boost, the user then turns the volume down by hand, and then bypasses or
+resets. The downward move now needs to go below zero, and the control floors
+there.
+
+Carrying the un-removable residue forward was the wrong answer twice over. It
+reported a failure, which holds the mute -- correct when make-up is standing over
+reduced attenuation, but here the volume is already at the floor, so there is
+nothing to be loud with and no further reduction available to retry. The books
+also stayed permanently wrong.
+
+So the floor discards it: appliedAtten becomes the target and the accounting
+matches the real volume again.
+]]
+print("=== a downward move that hits volume zero discards the residue ===")
+do
+	local st = newState(40)
+	levelMatch(st, 15.0)                       -- a +15 curve, volume climbs
+	ok("the curve raised the volume", st.volume > 40,
+	   string.format("40 -> %d", st.volume))
+
+	st.volume = 0                              -- the user turns it right down
+	st.truth  = 0                              -- nothing of ours is in it now
+
+	levelMatch(st, 0)                          -- bypass / reset: unwind it all
+
+	ok("appliedAtten is cleared, not left stranded", math.abs(st.applied) < 0.01,
+	   string.format("applied %.3f", st.applied))
+	ok("the books agree with the real volume", drift(st) < 0.01,
+	   string.format("drift %.3f", drift(st)))
+
+	-- And the state is usable again afterwards.
+	levelMatch(st, 6.0)
+	ok("a later curve compensates from a clean slate", st.applied > 0,
+	   string.format("applied %.2f from volume %d", st.applied, st.volume))
 end
 
 print("")

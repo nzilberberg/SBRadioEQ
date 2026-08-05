@@ -147,6 +147,26 @@ else -- no revert, no refusal, no popup.
 reconciliation that fails still keeps the output muted, because stale make-up
 over reduced attenuation is the loud state.
 ]]
+--[[
+At the volume control's floor, a downward move cannot complete.
+
+Reachable with nothing failing: level matching raises the volume to pay for a
+boost, the user turns the volume down by hand, then bypasses or resets. The
+remaining move would need to go below zero, and the control stops there.
+
+The residue is DISCARDED rather than carried. Keeping it reported a failure,
+which holds the mute -- right when make-up is standing over reduced attenuation,
+wrong here, because at the floor there is nothing to be loud with and no further
+reduction left to retry. It also left the bookkeeping permanently disagreeing
+with the real volume.
+
+This lives here rather than in the applet so the bench can exercise the same
+decision production makes; the applet cannot be loaded outside Jive.
+]]
+function M.floorDiscards(delta, curVolume)
+	return (delta or 0) < 0 and (curVolume or 0) <= 0
+end
+
 function M.shortfallDb(requiredDb, budgetDb)
 	local short = (requiredDb or 0) - (budgetDb or 0)
 	if short < 0 then return 0 end

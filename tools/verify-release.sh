@@ -179,6 +179,28 @@ catalog_version() {
 		| grep -o 'version="[^"]*"' | head -1 | sed 's/version="//;s/"//' || true
 }
 
+#[[ ---- the README's stated release --------------------------------------------
+#
+# ⛔ THIS GOES STALE EVERY SINGLE TIME, AND NOTHING NOTICED.
+#
+# The README carries a "Latest release vX.Y.Z" line. It was corrected by hand at
+# 0.2.4, and was stale again by 0.2.5, 0.2.6, 0.2.7 and 0.2.8 -- four releases in
+# a row, each time spotted by a human reading prose rather than by anything that
+# runs. A version number is the one piece of documentation a machine can check
+# exactly, so it should never have been the maintainer's job.
+#
+# Checked at release time because that is the moment it becomes wrong.
+#]]
+readme=$(grep -oE 'Latest release v[0-9]+\.[0-9]+\.[0-9]+' "$HERE/README.md" 2>/dev/null \
+	| head -1 | sed 's/.*v//')
+if [ -z "$readme" ]; then
+	bad "README has no 'Latest release vX.Y.Z' line to check"
+elif [ "$readme" = "$VERSION" ]; then
+	ok "README's stated release matches ($VERSION)"
+else
+	bad "README says the latest release is $readme, but this is $VERSION"
+fi
+
 STABLE_LOCAL="$HERE/docs/repo.xml"
 if [ ! -f "$STABLE_LOCAL" ]; then
 	bad "docs/repo.xml is missing -- installed users poll that file and would never see $VERSION"
