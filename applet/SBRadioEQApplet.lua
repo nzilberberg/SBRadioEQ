@@ -92,7 +92,7 @@ A visible build number makes it a glance instead of an investigation, for both
 of us. tools/deploy.sh bumps it, so it cannot be forgotten: the number that
 reaches the device is the number the deploy printed.
 ]]
-local BUILD = 59
+local BUILD = 60
 
 local C_PANEL     = 0x00000075     -- graph box
 local C_PANEL_EDGE= 0xFFFFFF2B
@@ -261,31 +261,24 @@ local function designFrom(s)
 end
 
 --[[
-⛔⛔ AFFORDABILITY IS A PROPERTY OF THE CURVE, NOT OF WHICH KNOB MOVED.
+THE CONTRACT: every valid EQ edit is applied. Nothing here refuses one.
 
-The guard used to be U.mustCheckAffordability(key, new, old), which returned
-false for anything that was not a GAIN going up. So Q and frequency edits skipped
-the check entirely -- and Q changes the cost. This project's own device
-measurement says so: both bands at +15 need 30.00 dB of make-up at Q 1.0 and
-34.41 dB at Q 2.0. The same measurement that corrected the README's "27 dB" was
-sitting there proving the guard had a hole in it, and nobody read it that way.
+  attenDb       the make-up the designed curve REQUIRES
+  appliedAtten  what the player volume actually supplied
+  shortfallDb   the remainder, when the volume ran out of room
 
-Reachable: set both gains to +15 at Q 1.0 with ~30 dB of budget (accepted, the
-volume climbs to near 100), then raise Q. No check runs, the dearer curve is
-written, the volume cannot pay the extra ~4.4 dB, and the output quietly sags --
-while the applet's own README promises it refuses what it cannot pay for.
+An upward shortfall makes the result quieter and is not an error. `limited`
+means compensation is PARTIAL, and drives the LIMITED marker; it is a
+measurement, never a verdict on the edit.
 
-So the test is now on the QUANTITY the guard protects: design the candidate, and
-if it costs MORE than the current curve and more than the budget, put the edit
-back. That covers gain, Q, frequency, and anything added later, because it asks
-the curve rather than the field name.
+Q and corner frequency change what a curve costs just as gain does -- measured
+at the defaults, both bands at +15 need 30.00 dB at Q 1.0 and 34.41 dB at
+Q 2.0 -- so cost is read from the designed curve rather than inferred from
+which control moved.
 
-COST. This does NOT add a design per detent. The check moved INTO _design, which
-already computes attenDb for the curve it is building, so the ordinary path still
-runs one designPair (~150-216 ms on this hardware). A second design happens only
-when a step is actually REJECTED, which is the rare case and is already a dead
-end for the user. An earlier verified-Q-clamp proposal was priced at 620 ms-3.3 s
-per click and rejected on exactly this ground; this stays at one.
+ONE designPair per detent. This function already designs the curve it is
+building, so the shortfall costs nothing extra; a knob path cannot afford a
+second design (~150-216 ms each on this hardware).
 ]]
 function _design(self)
 	local s = self:getSettings()
@@ -1442,11 +1435,16 @@ measured with the real face at the real width. Gated by test/test_textfit.lua,
 which re-measures the shipped string rather than trusting this comment.
 
 THE COPY IS LOAD-BEARING, so it is worth saying what it must not get wrong.
-Level matching moves the volume in BOTH directions -- dropping a boost lowers it
-again, and Reset lowers it by the whole make-up at once -- and it happens LIVE,
-on every detent, not when the screen is saved. A first draft said "raises the
-volume" and omitted the timing; both were wrong, and a description that is wrong
-about which way the volume moves is worse than no description.
+
+  DIRECTION   the volume moves BOTH ways -- dropping a boost lowers it again,
+              and Reset lowers it by the whole make-up at once. A first draft
+              said "raises the volume", which is worse than no description.
+  TIMING      it happens LIVE, on every detent, not when the screen is saved.
+  BEST EFFORT it compensates while volume range remains, then allows a QUIETER
+              result rather than refusing the EQ. Copy promising that loudness
+              never changes would describe a product this is not: the whole
+              point is that the curve is always applied and the shortfall is
+              simply heard.
 
 WIRED, to settings.levelMatch. That flag gates SIX places, and the reason to
 list them is that missing one leaves a feature half-off rather than off:
@@ -1835,9 +1833,10 @@ function resetShow(self, menuItem)
 				]]
 				--[[
 				A reset that left the output MUTED goes to the recovery screen,
-				not to a message. That state has actions attached -- try the
-				bypass again, or restart -- and a dead-end explanation was the
-				only thing available before that screen existed.
+				not to a message. That state has actions attached -- retry the
+				requested operation through the common apply transaction, or
+				restart the Radio -- and a dead-end explanation was the only
+				thing available before that screen existed.
 				]]
 				if res and res.stillMuted then
 					self:_mutedRecovery(res)
@@ -1877,8 +1876,10 @@ function toneShow(self, menuItem)
 		                 'settingstitle')
 		w:addWidget(Textarea("text",
 			"Tone controls unavailable on this firmware.\n\n" ..
-			"The in-process mixer module (baby_bsp) is missing.\n\n" ..
-			"Any tone setting already saved is still applied at startup."))
+			"This firmware is missing the Radio's in-process mixer module " ..
+			"(baby_bsp), which is the only way to reach the codec.\n\n" ..
+			"Saved tone settings cannot be applied until working Radio " ..
+			"firmware is restored."))
 		self:tieAndShowWindow(w)
 		return w
 	end
@@ -2054,10 +2055,10 @@ function settingsShow(self, menuItem)
 		                 'settingstitle')
 		w:addWidget(Textarea("text",
 			"Hardware EQ unavailable on this firmware.\n\n" ..
-			"The in-process mixer module (baby_bsp) is missing, and the fallback " ..
-			"is roughly a second per adjustment -- too slow to edit with, and it " ..
-			"cannot confirm a write succeeded.\n\n" ..
-			"Any EQ already saved is still applied at startup."))
+			"This firmware is missing the Radio's in-process mixer module " ..
+			"(baby_bsp), which is the only way to reach the codec.\n\n" ..
+			"Saved EQ settings cannot be applied until working Radio firmware " ..
+			"is restored."))
 		self:tieAndShowWindow(w)
 		return w
 	end

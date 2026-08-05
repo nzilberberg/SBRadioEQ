@@ -110,8 +110,10 @@ end
 
 print("=== with no callback at all, behaviour is unchanged ===")
 do
-	-- The shell fallback and the no-op early returns pass no reconcile. They must
-	-- still work exactly as before, or this change breaks the boot path.
+	-- A caller may omit the reconcile callback -- the no-op early returns take no
+	-- callback, and a test driving the low-level transaction directly need not
+	-- supply one. The result must then report reconciled=false, so the caller
+	-- knows the volume state was NOT handled for it.
 	A.forgetMutePoint(); A.mutePoint()
 	local r = rig(true)
 	local res = A.applyBSPMuted(r.bsp, d1, d2, PREV, false, false, nil)

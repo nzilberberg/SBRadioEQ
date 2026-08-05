@@ -59,20 +59,19 @@ do
 end
 
 --[[
-⛔⛔ THIS BLOCK USED TO ASSERT THE DEFECT.
+WHAT A CURVE COSTS, AND WHAT IS DONE ABOUT IT.
 
-It tested U.mustCheckAffordability directly, and two of its four assertions were
-"frequency is never checked" and "Q is never checked" -- passing expectations
-that the headroom guard ignored those controls. The guard did ignore them, and
-that was the bug: Q changes what the curve COSTS, so an unaffordable Q step was
-accepted, written to the codec, and reported as applied while the output sagged.
+Q and corner frequency change the required make-up exactly as gain does. An
+earlier headroom guard checked only gain increases, which made the controls
+behave inconsistently -- and the fix for that inconsistency was to REMOVE the
+guard, not to extend it: refusing an EQ edit because the volume cannot fully
+compensate it made a compensation service into a limit on what the user may
+build, and it fails in the quiet direction, so nothing was protected by it.
 
-A test that pins a defect in place is worse than no test, because the suite goes
-green over it and the next reader takes the behaviour as intended.
-
-What matters is the property the guard exists to protect: a change that makes the
-curve cost MORE than the budget must be refused, whichever control caused it. The
-cost is measured from the designed curve, so that is what is asserted here.
+These assertions therefore check that cost and shortfall are MEASURED, and that
+no edit is rejected for either. Note what the numbers below show about a
+gain-only rule: identical gains at different Q differ by several dB of required
+make-up, so a rule keyed to which control moved could never have been consistent.
 ]]
 print("=== cost is a property of the CURVE, not of which control moved ===")
 do
