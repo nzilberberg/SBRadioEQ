@@ -1083,11 +1083,42 @@ function M.designPair(fs, b1, b2)
 	next time.
 	]]
 	local MAX_CORRECTION_DB = 12.0
-	local MAX_PASSES        = 5
-	-- Ask for a hair more than the measured excess so a candidate that would land
-	-- exactly ON the line lands under it instead. Small enough to be inaudible,
-	-- large enough that convergence does not stall oscillating around zero.
-	local MARGIN_DB         = 0.05
+
+	--[[
+	PASSES AND MARGIN ARE A LATENCY BUDGET, NOT A PRECISION KNOB.
+
+	Each pass calls finish() -- fitQuantize, a candidate search and the dominant
+	cost in this file. designPair runs ONCE PER KNOB DETENT, so a pass is paid
+	where the user is holding the control.
+
+	MEASURED on an idle Radio (bench.sh --framework, Framework:getTicks; os.clock
+	is CPU time here and reads 0.00):
+
+	                          before   MAX_PASSES=5   MAX_PASSES=3
+	                                   MARGIN=0.05    MARGIN=0.5
+	  both flat                 2.4ms       2.0ms
+	  bass +6 @100 Q2.0       101.6ms     138.6ms
+	  bass -15 @800 Q0.2       43.3ms     114.6ms
+	  both +15 Q2.0            96.5ms     749.4ms      <- 7.8x, three quarters
+	                                                      of a second per detent
+
+	5 passes at a 0.05 dB margin converges by inching: each pass removes barely
+	more than the excess it just measured, re-quantises, and finds a new small
+	excess. Asking for MORE up front converges in one or two passes instead, and
+	the extra attenuation is not lost -- it is charged to attenDb like every other
+	cut and comes back as make-up gain.
+
+	So the margin is deliberately coarse. Trading a fraction of a dB of make-up
+	for 650 ms of knob latency is not a close call.
+
+	⛔ THE ACCEPTANCE RULE IS UNCHANGED. Fewer passes does not mean trusting a
+	formula again: a candidate is still returned only after its realised peak has
+	been MEASURED at or below unity, and if none qualifies the lowest-peak
+	candidate is returned with its real peak so _check fires and
+	test_clipinvariant fails. The budget bounds the SEARCH, never the standard.
+	]]
+	local MAX_PASSES = 3
+	local MARGIN_DB  = 0.5
 
 	local function finite(v)
 		return v ~= nil and v == v and v ~= 1 / 0 and v ~= -1 / 0
