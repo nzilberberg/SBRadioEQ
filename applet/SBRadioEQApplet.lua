@@ -297,6 +297,12 @@ function _design(self)
 	self.shortfallDb = U.shortfallDb(self.attenDb, self:_headroomDb())
 	self.limited     = s.levelMatch and self.shortfallDb > 0.05
 
+	-- Kept for _record, which runs later in _applyNow and cannot recompute these:
+	-- realisedPeakDb is a grid sweep and this is the knob path. Held on self so
+	-- the recorder logs the peaks designPair ACTUALLY produced for the
+	-- coefficients about to be written, not a second opinion about them.
+	self.diag = i.diag
+
 	self:_check(i.diag)
 	self:_recomputeCurve()
 end
@@ -337,6 +343,66 @@ signature being watched for.
 ]]
 local function ringing(r, f)
 	return r and f and r > R_WARN and f > RING_F_MIN
+end
+
+--[[
+THE FLIGHT RECORDER. Every apply, unconditionally.
+
+_check below is an ALARM: it fires when a computed quantity crosses a threshold.
+That is the wrong instrument for answering "what did it do at 21:59:31", and it
+failed at exactly that. Of the 269 bass settings that realised above 0 dB, only 3
+crossed PEAK_WARN_DB, so the log showed TWO events for what was almost certainly
+many, and the strongest claim available afterwards was "a clipping setting was
+loaded around then". Inference, not a record.
+
+This device cannot be listened to -- one jack, an output; no DAC-to-ADC path; no
+overflow flag among 77 mixer controls; no i2c, no debugfs. So the acoustic proof
+is unavailable ON PURPOSE-BUILT grounds, and the only thing that can be made
+complete is the record of what was SENT. That record has to be exact enough to
+replay: given a line of this, the bench can rebuild the identical filter and
+measure it.
+
+WHAT IT COSTS. One syslog line per apply. The knob path already writes
+SBEQ-SCROLL on every detent, so the marginal cost is one more write on an action
+the user just took -- not a background poll. The comment on _check about keeping
+syslog off the knob path was the right instinct applied to the wrong thing: what
+must stay cheap is the ALARM's peak sweep, and this reuses peaks already computed
+by designPair rather than recomputing them.
+
+⛔ NO FILE, DELIBERATELY. This writes to syslog, never to disk. The applet is
+gated by check-footprint.sh to leave nothing behind on uninstall, and a private
+log file is exactly the kind of thing that outlives its owner. /var/log/messages
+is the system's to rotate, and it survived long enough to diagnose this bug.
+
+The coefficients are logged as the INTEGERS THE CHIP RECEIVED, not the design
+that produced them. Those are two different things whenever quantisation is
+involved, and the whole defect being chased lives in the gap between them.
+]]
+local function coefStr(c)
+	if not c then return "nil" end
+	return string.format("%d/%d/%d/%d/%d", c.N0, c.N1, c.N2, c.D1, c.D2)
+end
+
+function _record(self, bypass, res)
+	local s = self:getSettings()
+	local d = self.diag or {}
+	local player = Player:getLocalPlayer()
+	log:warn("SBEQ-APPLY",
+	         " b=", s.bassFreq, "/", s.bassGain, "/", s.bassQ,
+	         " t=", s.trebFreq, "/", s.trebGain, "/", s.trebQ,
+	         " on=", tostring(s.enabled), " lm=", tostring(s.levelMatch),
+	         " bypass=", tostring(bypass),
+	         " pk=", tostring(d.peak1), "/", tostring(d.peak2),
+	         " r=", tostring(d.r1), "@", tostring(d.pf1),
+	         "/", tostring(d.r2), "@", tostring(d.pf2),
+	         " atten=", tostring(self.attenDb),
+	         " applied=", tostring(s.appliedAtten),
+	         " short=", tostring(self.shortfallDb),
+	         " vol=", tostring(player and player:getVolume()),
+	         " c1=", coefStr(self.c1), " c2=", coefStr(self.c2),
+	         " ok=", tostring(res and res.ok),
+	         " err=", tostring(res and res.error),
+	         " build=", BUILD)
 end
 
 function _check(self, d)
@@ -678,6 +744,8 @@ function _applyNow(self)
 		res = { ok = false, error = "baby_bsp is unavailable",
 		        hardwareStateUnknown = false, refused = true }
 	end
+
+	self:_record(bypass, res)
 
 	if res and res.ok then
 		self.written = { c1 = self.c1, c2 = self.c2 }

@@ -1,7 +1,27 @@
 --[[
 SBRadioEQ -- find sound that is not the tone you played.
 
-  cd /tmp/sbradioeq-bench && LISTEN_WAV=/tmp/sbradioeq-listen.wav jive listen_analyse
+  cd /tmp/sbradioeq-bench && LISTEN_WAV=<file.wav> jive listen_analyse
+
+⛔⛔ THE RECORDING MUST BE MADE EXTERNALLY. THIS DEVICE CANNOT MAKE IT.
+
+The Radio has ONE jack and it is an output. There is no line-in to loop back to,
+and no internal path from the DAC to the ADC: 'Left DAC Mux' offers only
+DAC_L1/L2/L3 (output routing), 'Left Line1L Mux' only single-ended/differential
+(input wiring), and 'Endpoint' only Off/Speaker/Headphone/FactoryTest. No mixer
+control among 77 reports overflow or clipping, and there is no /dev/i2c*, no
+i2c-tools and no debugfs, so the AIC3104's registers are unreachable. All
+measured on-device 2026-08-05.
+
+A companion script once recorded the Radio's own ADC on the assumption that a
+cable could close the loop. It was reading unconnected pins. That mistake came
+from taking the CODEC's mixer controls -- 'Line In Switch', 'Line In Test', a
+working capture device -- as evidence of a socket on the PRODUCT. The chip has
+line inputs; the board does not wire them.
+
+So capture the headphone output with something else: a PC's line-in, an audio
+interface, a phone. Any 16-bit stereo WAV works -- nothing here depends on where
+it came from.
 
 Reads a 16-bit stereo WAV and reports, per 100 ms block, four numbers that between
 them separate "the tone I played" from "something the device added":
