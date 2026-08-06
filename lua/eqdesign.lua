@@ -466,11 +466,18 @@ function M.realisedPeakDb(c, fs)
 	local b0, b1, b2, a1, a2 = M.dequantize(c)
 	local bestM, bf = -1 / 0, 0
 
+	-- The on-grid responses are recorded on the candidate as a side effect:
+	-- whichever candidate a caller finally keeps has, by the acceptance rule,
+	-- just been through this sweep, so designPair's level trim can read the
+	-- values instead of re-evaluating the section across the grid.
+	local gm = {}
 	local rowsG = trigFor(M.GRID, fs)
 	for i = 1, #M.GRID do
 		local m = mag2At(b0, b1, b2, a1, a2, rowsG[i])
+		gm[i] = m
 		if m > bestM then bestM, bf = m, M.GRID[i] end
 	end
+	c._gm = gm
 	local rowsS = trigFor(M.SUB_GRID, fs)                -- clipping below 40 Hz
 	for i = 1, #M.SUB_GRID do
 		local m = mag2At(b0, b1, b2, a1, a2, rowsS[i])
@@ -577,15 +584,19 @@ local FIT_PEAK_MEASURES = 8
 -- lattice too coarse to steer by scaling the input (measured 2026-08-05:
 -- scaling the float numerator -2 dB vs -4 dB moved the realised peak 0.04 dB).
 -- The peak constraint therefore has to be applied INSIDE candidate selection:
--- with capDb set, candidates are ranked by the same shape score, and the best
--- one whose realised peak MEASURES at or below capDb is returned, plus that
--- measured peak as a second result. When no candidate in the box measures
--- under the cap, the lowest-peak one measured is returned (its peak says so),
--- falling back to the best-shaped candidate with peak nil. Bounded: the box is
--- the same fixed enumeration (widened by nInt-1, the one-step-down DC lattice
--- point), cheap conservative pre-rejection runs on grid rows, and full peak
--- sweeps are capped at FIT_PEAK_MEASURES. No iteration anywhere.
-function fitQuantize(x, fs, capDb)
+-- with capDb set, candidates are sieved by a conservative clip check, ranked
+-- by the same shape score, and the best one whose realised peak MEASURES at or
+-- below capDb is returned, plus that measured peak and its frequency. When no
+-- candidate in the box measures under the cap, the lowest-peak one measured is
+-- returned (its peak says so), falling back to the best-shaped unmeasured
+-- candidate with peak nil. Bounded: the box is the same fixed enumeration
+-- (widened by nInt-1, the one-step-down DC lattice point) and full peak sweeps
+-- are capped at FIT_PEAK_MEASURES. No iteration anywhere.
+--
+-- hotF (optional, capped mode): the frequency where the FAILING candidate's
+-- peak was just measured, threaded in by the caller so the sieve can probe the
+-- most incriminating point first.
+function fitQuantize(x, fs, capDb, hotF)
 	local D1r = math.floor(-x.a1 * M.SCALE_2 + 0.5)
 	local N1  = math.floor(x.b1 * M.SCALE_2 + 0.5)
 	local den = 1 + x.a1 + x.a2
@@ -666,86 +677,260 @@ function fitQuantize(x, fs, capDb)
 		if capDb then
 			--[[ PEAK-CAPPED SELECTION -- see the note at the signature.
 
-			Rank every candidate by shape, then walk from best shape down and
-			return the first whose realised peak MEASURES under the cap. The walk
-			order is what keeps the level: a shape-damaged candidate (e.g. the
-			nInt-1 DC step, ~2.5 dB down at a 3-LSB DC sum) is taken only when
-			everything better-shaped clips. The cheap rejection below is
-			conservative by construction -- it evaluates a SUBSET of the points
-			realisedPeakDb uses, so anything it rejects would have failed the full
-			measurement too; nothing is ever ACCEPTED on the cheap check alone.
+			SIEVE FIRST, SCORE THE SURVIVORS, MEASURE BEST-SHAPE-FIRST. The walk
+			order is what keeps the level: a shape-damaged candidate (the nInt-1
+			DC step, ~2.5 dB down at a 3-LSB DC sum) sits in a second tier walked
+			only after every same-level candidate has been sieved out or measured
+			over. Nothing is ever ACCEPTED on a cheap check: acceptance is always
+			the full realisedPeakDb sweep on the candidate actually returned.
+
+			THE SIEVE IS CONSERVATIVE BY CONSTRUCTION: |H|^2 above the cap at ANY
+			frequency condemns a candidate, because the true peak can only be
+			higher. So it probes the point where the failing section's peak was
+			just measured (hotF), the candidate's own pole frequency, and the
+			Nyquist edge -- and rejects most over-cap candidates in one or two
+			evaluations. The previous version scored every candidate up front
+			(no early exit possible when ranking) and rejected through a grid
+			scan in bottom-up frequency order, which for a treble section put
+			the clipping region LAST: measured on the worst knob setting
+			(bass and treble both +15 dB Q 2.0), 14639 response evaluations per
+			detent and 733-768 ms on the idle device across three sessions.
+			This structure, same setting, same-session baseline: 973
+			evaluations, 137.20 ms -- with the acceptance rule untouched.
 			]]
 			local capM  = 10 ^ (capDb / 10)                 -- |H|^2 form of the cap
+
+			-- hotF and the Nyquist edge are the same for every candidate in the
+			-- box, so their trig is paid once here, not once per candidate.
+			local hotRow
+			if hotF and hotF > 0 and hotF < fs / 2 then
+				local w = 2 * math.pi * hotF / fs
+				hotRow = { math.cos(w), math.sin(w), math.cos(2 * w), math.sin(2 * w) }
+			end
+			local wn = 2 * math.pi * (fs / 2 - 1) / fs
+			local nyqRow = { math.cos(wn), math.sin(wn), math.cos(2 * wn), math.sin(2 * wn) }
+
+			-- Highest |H|^2 among the sieve points. NaN reads as over (1/0), so a
+			-- NaN candidate can never reach the walk unmeasured. Stops probing
+			-- once the candidate is condemned.
+			local function sievePeak(c)
+				local b0, b1, b2, a1, a2 = M.dequantize(c)
+				local worst = -1 / 0
+				local function seen(m)
+					if m ~= m then worst = 1 / 0
+					elseif m > worst then worst = m end
+				end
+				-- Cheapest first: hot and Nyquist use precomputed trig rows; the
+				-- pole probe pays four trig calls, so it goes last and only runs
+				-- on candidates the cheap points failed to condemn.
+				if hotRow then seen(mag2At(b0, b1, b2, a1, a2, hotRow)) end
+				if worst <= capM then seen(mag2At(b0, b1, b2, a1, a2, nyqRow)) end
+				if worst <= capM then
+					local pfq = M.poleFreq(a1, a2, fs)
+					if pfq and pfq > 0 and pfq < fs / 2 then
+						seen(mag2Freq(b0, b1, b2, a1, a2, pfq, fs))
+					end
+				end
+				return worst
+			end
+
+			-- Conservative grid guard for the walk: a candidate over the cap on
+			-- any coarse point cannot measure clean, so it is skipped WITHOUT
+			-- spending one of the FIT_PEAK_MEASURES full sweeps. The scan runs
+			-- toward the failing section's own region first -- direction cannot
+			-- change the verdict, only how soon an over candidate is caught.
 			local rowsG = trigFor(M.GRID, fs)
 			local rowsS = trigFor(M.SUB_GRID, fs)
-			local function overCap(c)
+			local coarseIdx = {}
+			for i = 1, #M.GRID, 4 do coarseIdx[#coarseIdx + 1] = i end
+			if hotF and hotF >= 1000 then
+				local nrev, tmp = #coarseIdx, {}
+				for i = 1, nrev do tmp[i] = coarseIdx[nrev + 1 - i] end
+				coarseIdx = tmp
+			end
+			local function overCoarse(c)
 				local b0, b1, b2, a1, a2 = M.dequantize(c)
-				for i = 1, #M.GRID do
-					local m = mag2At(b0, b1, b2, a1, a2, rowsG[i])
+				for k = 1, #coarseIdx do
+					local m = mag2At(b0, b1, b2, a1, a2, rowsG[coarseIdx[k]])
 					if m ~= m or m > capM then return true end
 				end
-				for i = 1, #M.SUB_GRID do
+				for i = 1, #M.SUB_GRID, 4 do
 					local m = mag2At(b0, b1, b2, a1, a2, rowsS[i])
 					if m ~= m or m > capM then return true end
 				end
-				local pfq = M.poleFreq(a1, a2, fs)
-				if pfq and pfq > 0 and pfq < fs / 2 then
-					local m = mag2Freq(b0, b1, b2, a1, a2, pfq, fs)
-					if m ~= m or m > capM then return true end
-				end
-				local m = mag2Freq(b0, b1, b2, a1, a2, fs / 2 - 1, fs)
-				if m ~= m or m > capM then return true end
 				return false
 			end
 
-			local list, n = {}, 0
-			local function consider(c)
-				if c then
-					local s = score(c, 1 / 0)
-					if s < 1 / 0 then n = n + 1; list[n] = { c = c, s = s } end
+			local loHotC, loHotV = nil, 1 / 0
+			-- Sieve verdicts are cached per entry (e.hv), so a candidate is
+			-- probed at most once no matter which phase reaches it.
+			local function sieveOK(e)
+				if e.hv == nil then
+					e.hv = sievePeak(e.c)
+					if e.hv < loHotV then loHotC, loHotV = e.c, e.hv end
 				end
+				return e.hv <= capM
 			end
-			consider(build(dInt0, D1r, nR0))
-			for _, dd in ipairs({ 0, -1, 1 }) do
-				local dInt = dInt0 + dd
-				if dInt >= 1 then
-					local nf = math.floor(gDC * dInt)
-					for _, dD1 in ipairs(FIT_DD1) do
-						-- nf - 1 exists ONLY in capped mode: one DC lattice step
-						-- down, the escape from a plateau where every same-level
-						-- candidate sits above the cap. The uncapped path must
-						-- not see it -- the shift-invariant score could prefer
-						-- it and silently change settled realised outputs.
-						for _, nInt in ipairs({ nf - 1, nf, nf + 1 }) do
-							if not (dd == 0 and dD1 == 0 and nInt == nR0) then
-								consider(build(dInt, D1r + dD1, nInt))
+
+			local measured, loC, loP, loF = 0, nil, nil, nil
+			local fallC = nil        -- best-scored sieve-passer seen, for the
+			                         -- nothing-measured-clean fallback
+			local function walk(list)
+				table.sort(list, function(a, b) return a.s < b.s end)
+				for i = 1, #list do
+					if measured >= FIT_PEAK_MEASURES then return nil end
+					local e = list[i]
+					if sieveOK(e) then
+						if fallC == nil then fallC = e.c end
+						if not overCoarse(e.c) then
+							local pk, pkf = M.realisedPeakDb(e.c, fs)
+							measured = measured + 1
+							if pk == pk and pk <= capDb then return e.c, pk, pkf end
+							if pk == pk and (loP == nil or pk < loP) then loC, loP, loF = e.c, pk, pkf end
+						end
+					end
+				end
+				return nil
+			end
+
+			-- PHASE 1 -- known shapes first, everything else lazy. When the
+			-- uncapped call that preceded this one scored the identical input
+			-- (designPair's first correction pass never rescales), every stashed
+			-- candidate with a FINITE score is provably at least as well shaped
+			-- as everything that got cut off, and their order is exact. Walking
+			-- just those resolves the common overshoot in one or two probes and
+			-- one full sweep, with the rest of the box never touched.
+			--
+			-- A stashed 1/0 cannot be walked on faith, though: it only means
+			-- "cut off against the uncapped best", and that best may be exactly
+			-- the candidate the sieve rejects here. Carrying 1/0s into the walk
+			-- left the survivors unordered once (measured: a candidate
+			-- realising 1.89 dB from the request at bass 100/+12/Q2.0 shipped,
+			-- past the 1 dB the graph test allows), so unknown-score candidates
+			-- go to phase 2, which sieves first and scores what survives.
+			local known, unknown = {}, {}
+			local reuse = x._fit
+			if reuse and reuse.b0 == x.b0 and reuse.b1 == x.b1 and reuse.b2 == x.b2 then
+				for i = 1, reuse.n do
+					local e = reuse.list[i]
+					if e.s < 1 / 0 then
+						known[#known + 1] = { c = e.c, s = e.s }
+					else
+						unknown[#unknown + 1] = { c = e.c }
+					end
+				end
+			else
+				local function keep(c)
+					if c then unknown[#unknown + 1] = { c = c } end
+				end
+				keep(build(dInt0, D1r, nR0))
+				for _, dd in ipairs({ 0, -1, 1 }) do
+					local dInt = dInt0 + dd
+					if dInt >= 1 then
+						local nf = math.floor(gDC * dInt)
+						for _, dD1 in ipairs(FIT_DD1) do
+							for _, nInt in ipairs({ nf, nf + 1 }) do
+								if not (dd == 0 and dD1 == 0 and nInt == nR0) then
+									keep(build(dInt, D1r + dD1, nInt))
+								end
 							end
 						end
 					end
 				end
 			end
-			table.sort(list, function(a, b) return a.s < b.s end)
+			local okC, okP, okF = walk(known)
+			if okC then return okC, okP, okF end
 
-			local measured, loC, loP = 0, nil, nil
-			for i = 1, n do
-				local c = list[i].c
-				if not overCap(c) then
-					local pk = M.realisedPeakDb(c, fs)
-					if pk == pk and pk <= capDb then return c, pk end
-					if pk == pk and (loP == nil or pk < loP) then loC, loP = c, pk end
-					measured = measured + 1
-					if measured >= FIT_PEAK_MEASURES then break end
+			-- PHASE 2: sieve the unknown-score candidates and walk them IN
+			-- WAVES. Candidates are generated in perturbation order -- the
+			-- sum-fix candidate's own neighbourhood first -- and the measured
+			-- winner is nearly always among the first few survivors, so scoring
+			-- the whole box up front paid for shape rankings the walk never
+			-- reached. Within a wave the order is by the same score (cutoff
+			-- against the wave's running best -- scores exist to order THIS
+			-- list); a later wave starts only after every candidate of the
+			-- earlier one has been sieved out, guarded off, or measured over.
+			--
+			-- ⛔ WAVES ONLY WHERE THE LATTICE IS DENSE. At low bass corners the
+			-- DC sum is 2-5 LSB and a one-LSB perturbation changes the SHAPE
+			-- outright, so only the exact global ordering keeps the graph
+			-- honest: wave-walking those corners shipped a candidate realising
+			-- 1.74 dB from the request at bass 100/+12/Q2.0 (measured, local
+			-- sweep), past the 1 dB the graph test allows. With a large DC sum
+			-- the same perturbations barely move the shape, and there the walk
+			-- may stop scoring as soon as it measures a clean candidate.
+			local WAVE = (dInt0 >= 64) and 8 or #unknown
+			local wi = 1
+			while wi <= #unknown and measured < FIT_PEAK_MEASURES do
+				local wave, bestW = {}, 1 / 0
+				while wi <= #unknown and #wave < WAVE do
+					local e = unknown[wi]
+					wi = wi + 1
+					if sieveOK(e) then
+						e.s = score(e.c, bestW)
+						wave[#wave + 1] = e
+						if e.s < bestW then bestW = e.s end
+					end
+				end
+				okC, okP, okF = walk(wave)
+				if okC then return okC, okP, okF end
+			end
+
+			-- TIER B, built only when every same-level candidate failed: nf - 1,
+			-- one DC lattice step down, the escape from a plateau where every
+			-- same-level candidate sits above the cap. It trades real level for
+			-- headroom, so it is walked strictly last. The uncapped path must
+			-- not see it at all -- the shift-invariant score could prefer it
+			-- and silently change settled realised outputs.
+			local tierB = {}
+			local bestB = 1 / 0
+			for _, dd in ipairs({ 0, -1, 1 }) do
+				local dInt = dInt0 + dd
+				if dInt >= 1 then
+					local nf = math.floor(gDC * dInt)
+					for _, dD1 in ipairs(FIT_DD1) do
+						local c = build(dInt, D1r + dD1, nf - 1)
+						if c then
+							local e = { c = c }
+							if sieveOK(e) then
+								e.s = score(c, bestB)
+								tierB[#tierB + 1] = e
+								if e.s < bestB then bestB = e.s end
+							end
+						end
+					end
 				end
 			end
-			if loC then return loC, loP end
-			if n > 0 then return list[1].c, nil end
+			okC, okP, okF = walk(tierB)
+			if okC then return okC, okP, okF end
+
+			if loC then return loC, loP, loF end
+			if fallC then return fallC, nil end
+			-- every candidate sieved out: hand back the least-over one with peak
+			-- nil (nothing unmeasured is ever trusted) and say so via the fourth
+			-- result -- the sieve is one-sided, so "all condemned" is a measured
+			-- fact about this level, not a prediction.
+			if loHotC then return loHotC, nil, nil, true end
 			-- nothing usable in the box: fall through to the plain-round fallback
 		else
 			local best, bestc = 1 / 0, nil
 
+			-- Record the scored box as it is built: designPair's correction
+			-- re-fits the SAME input (its first pass never rescales), and
+			-- rebuilding + rescoring these exact candidates was pure duplicate
+			-- work on every overshooting detent. Scores cut off against the
+			-- running best are stored as 1/0 -- the same partial order the
+			-- capped walk already tolerates. Selection below is unchanged.
+			local fit = { b0 = x.b0, b1 = x.b1, b2 = x.b2, list = {}, n = 0 }
+			local function note(c, s)
+				fit.n = fit.n + 1
+				fit.list[fit.n] = { c = c, s = s }
+			end
+
 			local c0 = build(dInt0, D1r, nR0)
 			if c0 then
 				best, bestc = score(c0, 1 / 0), c0
+				note(c0, best)
 				if best <= FIT_ACCEPT_R then return bestc end
 			end
 			for _, dd in ipairs({ 0, -1, 1 }) do
@@ -758,6 +943,7 @@ function fitQuantize(x, fs, capDb)
 								local c = build(dInt, D1r + dD1, nInt)
 								if c then
 									local e = score(c, best)
+									note(c, e)
 									if e < best then best, bestc = e, c end
 								end
 							end
@@ -765,6 +951,7 @@ function fitQuantize(x, fs, capDb)
 					end
 				end
 			end
+			x._fit = fit
 			if bestc then return bestc end
 		end
 	end
@@ -832,14 +1019,22 @@ function M.designPair(fs, b1, b2)
 	local function peakOf(x)
 		if not x then return -1 / 0 end
 		local bestM, bf = -1 / 0, 0
+		-- Cache the per-point responses (x.gm over GRID, x.gs over SUB_GRID).
+		-- Every later numerator scaling multiplies |H|^2 by a known constant, so
+		-- the pair sweep and the level trim below reuse these as
+		-- cached * klin^2 instead of re-evaluating the section per point; klin
+		-- tracks the accumulated linear scale from this (pre-scale) baseline.
+		x.gm, x.gs, x.klin = {}, {}, 1
 		local rowsG = trigFor(grid, fs)
 		for i = 1, #grid do
 			local m = mag2At(x.b0, x.b1, x.b2, x.a1, x.a2, rowsG[i])
+			x.gm[i] = m
 			if m == m and m > bestM then bestM, bf = m, grid[i] end   -- m == m rejects NaN
 		end
 		local rowsS = trigFor(M.SUB_GRID, fs)             -- clipping below 40 Hz
 		for i = 1, #M.SUB_GRID do
 			local m = mag2At(x.b0, x.b1, x.b2, x.a1, x.a2, rowsS[i])
+			x.gs[i] = m
 			if m == m and m > bestM then bestM, bf = m, M.SUB_GRID[i] end
 		end
 		local function at(f)
@@ -864,6 +1059,7 @@ function M.designPair(fs, b1, b2)
 		if peak <= 0 then return 0 end
 		local k = 10 ^ (-peak / 20)
 		x.b0, x.b1, x.b2 = x.b0 * k, x.b1 * k, x.b2 * k
+		x.klin = x.klin * k
 		return peak
 	end
 
@@ -894,6 +1090,7 @@ function M.designPair(fs, b1, b2)
 		if worst <= LIMIT then return 0 end
 		local k = LIMIT / worst
 		x.b0, x.b1, x.b2 = x.b0 * k, x.b1 * k, x.b2 * k
+		if x.klin then x.klin = x.klin * k end
 		return -20 * log10(k)          -- positive dB of extra attenuation
 	end
 
@@ -910,47 +1107,54 @@ function M.designPair(fs, b1, b2)
 	   64-point grid cannot see either section's needle, so the candidate set is
 	   the grid plus BOTH pole frequencies plus a refinement around the winner.
 	]]
+	-- The whole sweep exists to compute k2, and k2 is only ever applied to r2:
+	-- with no second section it is dead work (the intermediate constraint above
+	-- already normalised r1 on its own), so it is skipped outright.
 	local peakM, pf2 = -1 / 0, 0
-	do
-		local rowsG = trigFor(grid, fs)
-		for i = 1, #grid do
-			local t = rowsG[i]
-			local m = 1
-			if r1 then m = m * mag2At(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, t) end
-			if r2 then m = m * mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, t) end
-			if m == m and m > peakM then peakM, pf2 = m, grid[i] end
-		end
-		local rowsS = trigFor(M.SUB_GRID, fs)             -- clipping below 40 Hz
-		for i = 1, #M.SUB_GRID do
-			local t = rowsS[i]
-			local m = 1
-			if r1 then m = m * mag2At(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, t) end
-			if r2 then m = m * mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, t) end
-			if m == m and m > peakM then peakM, pf2 = m, M.SUB_GRID[i] end
-		end
-	end
-	local function pairAt(f)
-		if not (f and f > 0 and f < fs / 2) then return end
-		local m = 1
-		if r1 then m = m * mag2Freq(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, f, fs) end
-		if r2 then m = m * mag2Freq(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, f, fs) end
-		if m == m and m > peakM then peakM, pf2 = m, f end
-	end
-	if r1 then pairAt(M.poleFreq(r1.a1, r1.a2, fs)) end
-	if r2 then pairAt(M.poleFreq(r2.a1, r2.a2, fs)) end
-	pairAt(fs / 2 - 1)
-	if pf2 > 0 then
-		local lo, hi = pf2 * 0.85, pf2 * 1.15
-		for i = 0, 24 do pairAt(lo + (hi - lo) * i / 24) end
-	end
 	local peak2 = -1 / 0
-	if peakM ~= -1 / 0 then peak2 = 10 * log10(peakM) end
+	if r2 then
+		do
+			-- r1's on-grid responses were cached by peakOf (see there); r2's are
+			-- evaluated once here and cached the same way for the trim below.
+			r2.gm, r2.gs, r2.klin = {}, {}, 1
+			local kk1 = r1 and (r1.klin * r1.klin) or 0
+			local rowsG = trigFor(grid, fs)
+			for i = 1, #grid do
+				local m = mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, rowsG[i])
+				r2.gm[i] = m
+				if r1 then m = m * (r1.gm[i] * kk1) end
+				if m == m and m > peakM then peakM, pf2 = m, grid[i] end
+			end
+			local rowsS = trigFor(M.SUB_GRID, fs)         -- clipping below 40 Hz
+			for i = 1, #M.SUB_GRID do
+				local m = mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, rowsS[i])
+				r2.gs[i] = m
+				if r1 then m = m * (r1.gs[i] * kk1) end
+				if m == m and m > peakM then peakM, pf2 = m, M.SUB_GRID[i] end
+			end
+		end
+		local function pairAt(f)
+			if not (f and f > 0 and f < fs / 2) then return end
+			local m = mag2Freq(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, f, fs)
+			if r1 then m = m * mag2Freq(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, f, fs) end
+			if m == m and m > peakM then peakM, pf2 = m, f end
+		end
+		if r1 then pairAt(M.poleFreq(r1.a1, r1.a2, fs)) end
+		pairAt(M.poleFreq(r2.a1, r2.a2, fs))
+		pairAt(fs / 2 - 1)
+		if pf2 > 0 then
+			local lo, hi = pf2 * 0.85, pf2 * 1.15
+			for i = 0, 24 do pairAt(lo + (hi - lo) * i / 24) end
+		end
+		if peakM ~= -1 / 0 then peak2 = 10 * log10(peakM) end
+	end
 
 	local k2 = 0
 	if peak2 > 0 and peak2 == peak2 and peak2 ~= 1 / 0 and r2 then
 		k2 = peak2
 		local k = 10 ^ (-peak2 / 20)
 		r2.b0, r2.b1, r2.b2 = r2.b0 * k, r2.b1 * k, r2.b2 * k
+		r2.klin = r2.klin * k
 	end
 
 	-- Now make sure the integers themselves fit. Section 1 first, because
@@ -1129,12 +1333,12 @@ function M.designPair(fs, b1, b2)
 	-- realisedPeakDb sweep on every knob click.
 	local function correct(x, c, budget)
 		if not x or not c then return c, 0, nil end
-		local p = M.realisedPeakDb(c, fs)
+		local p, pf = M.realisedPeakDb(c, fs)
 		if not finite(p) then return c, 0, nil end
 		if p <= 0 then return c, 0, p end
 
 		-- The untouched numerator. Every pass scales THIS, never the running one.
-		local ob0, ob1, ob2 = x.b0, x.b1, x.b2
+		local ob0, ob1, ob2, oklin = x.b0, x.b1, x.b2, x.klin
 		local applied, excess       = 0, p
 		local bestC, bestP, bestApp = nil, nil, 0
 
@@ -1151,15 +1355,30 @@ function M.designPair(fs, b1, b2)
 
 				local k = 10 ^ (-applied / 20)
 				x.b0, x.b1, x.b2 = ob0 * k, ob1 * k, ob2 * k
+				if oklin then x.klin = oklin * k end
 			end
 
-			local cand, pk = fitQuantize(x, fs, 0)
-			if cand and pk == nil then pk = M.realisedPeakDb(cand, fs) end
+			-- pf -- where the peak of the last MEASURED candidate sat -- is the
+			-- sieve's first probe; each pass follows the measurement it just made.
+			local cand, pk, pkf, allOver = fitQuantize(x, fs, 0, pf)
+			if allOver and pass == 1 then
+				-- Pass 1 re-fits at the SAME level, and the sieve just measured
+				-- every candidate in the box above the cap at some point -- one
+				-- point over is proof, the true peak is only higher. A full
+				-- sweep of the least-over one cannot come in clean and cannot
+				-- beat the excess already measured for this level, so go spend
+				-- level instead. On later passes the box sits at a NEW level
+				-- and its least-over candidate may be the best this section
+				-- will get, so those are still measured and tracked.
+			else
+				if cand and pk == nil then pk, pkf = M.realisedPeakDb(cand, fs) end
 
-			if not cand or not finite(pk) then break end   -- keep the last good candidate
-			if not bestP or pk < bestP then bestC, bestP, bestApp = cand, pk, applied end
-			if pk <= 0 then return cand, applied, pk end   -- MEASURED under the line
-			excess = pk
+				if not cand or not finite(pk) then break end   -- keep the last good candidate
+				if not bestP or pk < bestP then bestC, bestP, bestApp = cand, pk, applied end
+				if pk <= 0 then return cand, applied, pk end   -- MEASURED under the line
+				excess = pk
+				if pkf and pkf > 0 then pf = pkf end
+			end
 		end
 
 		--[[
@@ -1171,7 +1390,7 @@ function M.designPair(fs, b1, b2)
 		quietly shipping a section that the invariant says should not exist.
 		]]
 		if bestC then return bestC, bestApp, bestP end
-		x.b0, x.b1, x.b2 = ob0, ob1, ob2
+		x.b0, x.b1, x.b2, x.klin = ob0, ob1, ob2, oklin
 		return c, 0, p
 	end
 
@@ -1280,17 +1499,24 @@ function M.designPair(fs, b1, b2)
 		local rows = trigFor(grid, fs)
 		local v1 = r1 and { M.dequantize(q1) } or nil
 		local v2 = r2 and { M.dequantize(q2) } or nil
+		-- The ideal responses come from the caches recorded when each section
+		-- was first swept (peakOf for r1, the pair sweep for r2), scaled by the
+		-- accumulated numerator scale -- not re-evaluated per point.
+		local kk1 = r1 and (r1.klin * r1.klin) or 0
+		local kk2 = r2 and (r2.klin * r2.klin) or 0
 		local mnP, mxP = 1 / 0, -1 / 0
+		local g1 = q1 and q1._gm or nil     -- realised responses recorded by the
+		local g2 = q2 and q2._gm or nil     -- section's own acceptance sweep
 		for i = 1, #grid do
 			local t = rows[i]
 			local P = 1
 			if v1 then
-				P = P * (mag2At(v1[1], v1[2], v1[3], v1[4], v1[5], t)
-				         / mag2At(r1.b0, r1.b1, r1.b2, r1.a1, r1.a2, t))
+				P = P * ((g1 and g1[i] or mag2At(v1[1], v1[2], v1[3], v1[4], v1[5], t))
+				         / (r1.gm[i] * kk1))
 			end
 			if v2 then
-				P = P * (mag2At(v2[1], v2[2], v2[3], v2[4], v2[5], t)
-				         / mag2At(r2.b0, r2.b1, r2.b2, r2.a1, r2.a2, t))
+				P = P * ((g2 and g2[i] or mag2At(v2[1], v2[2], v2[3], v2[4], v2[5], t))
+				         / (r2.gm[i] * kk2))
 			end
 			if P == P and P < mnP then mnP = P end
 			if P == P and P > mxP then mxP = P end
