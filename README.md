@@ -202,7 +202,7 @@ graph shows it honestly rather than hiding it.
 
 ## Status
 
-Working and in daily use. Latest release v0.2.10; installable from the catalog URL above. Not listed
+Working and in daily use. Latest release v0.2.11; installable from the catalog URL above. Not listed
 in the central LMS plugin repository — that would be a pull request to
 `lms-community/lms-plugin-repository`, and it has not been made.
 
