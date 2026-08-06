@@ -72,11 +72,50 @@ else
 	WANT=$(cd "$HERE/test" && ls test_*.lua | sed 's/\.lua$//' | tr '\n' ' ')
 fi
 
+#[[ ⛔⛔ A LOCAL `timeout` DOES NOT BOUND THE REMOTE PROCESS.
+#
+# SSH_RUN's timeout kills the ssh CLIENT. The remote command keeps going, and the
+# Radio has no `timeout` of its own to stop it. Here that is worse than a single
+# stranded process: the remote command is a LOOP, so after the client is gone the
+# device carries on starting jive after jive with nobody reading a word of it, on
+# one 360 MHz core.
+#
+# Measured in tools/bench.sh's sibling of this bug (2026-08-05): three orphaned
+# runs drove the load average to 3.29 and every measurement taken in that state
+# was worthless -- the same hazard the --framework busy-check refuses to time
+# through. The orphans are invisible from here; nothing fails, results just get
+# slower and then wrong.
+#
+# Record the PIDs first and subtract afterwards. Killing by name takes down
+# SqueezePlay, which is pid 1 of the set and always running.
+#]]
+PRE_JIVE=$($SSH "$RADIO" "pidof jive" 2>/dev/null || true)
+
 echo "running in $REMOTE on $RADIO"
-out=$($SSH_RUN "$RADIO" "cd $REMOTE && for n in $WANT; do printf '%-20s ' \$n; /usr/bin/jive \$n 2>&1 | tail -1; done") || {
-	echo "FAIL(2): the run itself did not complete"
+RUN_RC=0
+out=$($SSH_RUN "$RADIO" "cd $REMOTE && for n in $WANT; do printf '%-20s ' \$n; /usr/bin/jive \$n 2>&1 | tail -1; done") || RUN_RC=$?
+
+if [ "$RUN_RC" -ne 0 ]; then
+	printf '%s\n' "$out"
+	NOW_JIVE=$($SSH "$RADIO" "pidof jive" 2>/dev/null || true)
+	STRAY=""
+	for p in $NOW_JIVE; do
+		found=0
+		for q in $PRE_JIVE; do [ "$p" = "$q" ] && found=1 && break; done
+		[ "$found" -eq 0 ] && STRAY="$STRAY $p"
+	done
+	if [ -n "$STRAY" ]; then
+		echo "reaping remote process(es) this run started and left behind:$STRAY"
+		$SSH "$RADIO" "kill -9$STRAY" >/dev/null 2>&1 || true
+	fi
+	if [ "$RUN_RC" -eq 124 ]; then
+		echo "FAIL(2): the run TIMED OUT after ${SUITE_TIMEOUT:-900}s (partial output above)."
+		echo "  Do not simply re-run: a device that timed out once is slower next time."
+	else
+		echo "FAIL(2): the run itself did not complete (exit $RUN_RC)"
+	fi
 	exit 2
-}
+fi
 
 echo "$out"
 

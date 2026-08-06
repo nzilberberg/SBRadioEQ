@@ -562,10 +562,30 @@ local FIT_EVAL   = { 40, 55, 75, 105, 145, 200, 280, 460, 900, 3000 }
 local FIT_ACCEPT = 0.15
 local FIT_DD1    = { 0, -1, 1, -3, 3, -6, 6, -10, 10 }
 
+-- Peak-capped mode only: hard bound on full realisedPeakDb sweeps per call, so
+-- the capped selection has a fixed worst-case cost like everything else here.
+local FIT_PEAK_MEASURES = 8
+
 
 -- Assigns the forward-declared local above (no `local` here: `local function`
 -- would create a fresh variable and leave design()'s upvalue nil).
-function fitQuantize(x, fs)
+--
+-- capDb (optional): peak-capped mode, used by designPair's correction. The
+-- shift-invariant score below deliberately ignores uniform level, so the LEVEL
+-- of the integers this returns is not controlled by the level of the input --
+-- and at low bass corners the DC sums are 2-5 LSB, so realised level moves on a
+-- lattice too coarse to steer by scaling the input (measured 2026-08-05:
+-- scaling the float numerator -2 dB vs -4 dB moved the realised peak 0.04 dB).
+-- The peak constraint therefore has to be applied INSIDE candidate selection:
+-- with capDb set, candidates are ranked by the same shape score, and the best
+-- one whose realised peak MEASURES at or below capDb is returned, plus that
+-- measured peak as a second result. When no candidate in the box measures
+-- under the cap, the lowest-peak one measured is returned (its peak says so),
+-- falling back to the best-shaped candidate with peak nil. Bounded: the box is
+-- the same fixed enumeration (widened by nInt-1, the one-step-down DC lattice
+-- point), cheap conservative pre-rejection runs on grid rows, and full peak
+-- sweeps are capped at FIT_PEAK_MEASURES. No iteration anywhere.
+function fitQuantize(x, fs, capDb)
 	local D1r = math.floor(-x.a1 * M.SCALE_2 + 0.5)
 	local N1  = math.floor(x.b1 * M.SCALE_2 + 0.5)
 	local den = 1 + x.a1 + x.a2
@@ -642,31 +662,111 @@ function fitQuantize(x, fs)
 
 		local dInt0 = math.max(1, math.floor(sI + 0.5))
 		local nR0   = math.floor(gDC * dInt0 + 0.5)
-		local best, bestc = 1 / 0, nil
 
-		local c0 = build(dInt0, D1r, nR0)
-		if c0 then
-			best, bestc = score(c0, 1 / 0), c0
-			if best <= FIT_ACCEPT_R then return bestc end
-		end
-		for _, dd in ipairs({ 0, -1, 1 }) do
-			local dInt = dInt0 + dd
-			if dInt >= 1 then
-				local nf = math.floor(gDC * dInt)
-				for _, dD1 in ipairs(FIT_DD1) do
-					for _, nInt in ipairs({ nf, nf + 1 }) do
-						if not (dd == 0 and dD1 == 0 and nInt == nR0) then
-							local c = build(dInt, D1r + dD1, nInt)
-							if c then
-								local e = score(c, best)
-								if e < best then best, bestc = e, c end
+		if capDb then
+			--[[ PEAK-CAPPED SELECTION -- see the note at the signature.
+
+			Rank every candidate by shape, then walk from best shape down and
+			return the first whose realised peak MEASURES under the cap. The walk
+			order is what keeps the level: a shape-damaged candidate (e.g. the
+			nInt-1 DC step, ~2.5 dB down at a 3-LSB DC sum) is taken only when
+			everything better-shaped clips. The cheap rejection below is
+			conservative by construction -- it evaluates a SUBSET of the points
+			realisedPeakDb uses, so anything it rejects would have failed the full
+			measurement too; nothing is ever ACCEPTED on the cheap check alone.
+			]]
+			local capM  = 10 ^ (capDb / 10)                 -- |H|^2 form of the cap
+			local rowsG = trigFor(M.GRID, fs)
+			local rowsS = trigFor(M.SUB_GRID, fs)
+			local function overCap(c)
+				local b0, b1, b2, a1, a2 = M.dequantize(c)
+				for i = 1, #M.GRID do
+					local m = mag2At(b0, b1, b2, a1, a2, rowsG[i])
+					if m ~= m or m > capM then return true end
+				end
+				for i = 1, #M.SUB_GRID do
+					local m = mag2At(b0, b1, b2, a1, a2, rowsS[i])
+					if m ~= m or m > capM then return true end
+				end
+				local pfq = M.poleFreq(a1, a2, fs)
+				if pfq and pfq > 0 and pfq < fs / 2 then
+					local m = mag2Freq(b0, b1, b2, a1, a2, pfq, fs)
+					if m ~= m or m > capM then return true end
+				end
+				local m = mag2Freq(b0, b1, b2, a1, a2, fs / 2 - 1, fs)
+				if m ~= m or m > capM then return true end
+				return false
+			end
+
+			local list, n = {}, 0
+			local function consider(c)
+				if c then
+					local s = score(c, 1 / 0)
+					if s < 1 / 0 then n = n + 1; list[n] = { c = c, s = s } end
+				end
+			end
+			consider(build(dInt0, D1r, nR0))
+			for _, dd in ipairs({ 0, -1, 1 }) do
+				local dInt = dInt0 + dd
+				if dInt >= 1 then
+					local nf = math.floor(gDC * dInt)
+					for _, dD1 in ipairs(FIT_DD1) do
+						-- nf - 1 exists ONLY in capped mode: one DC lattice step
+						-- down, the escape from a plateau where every same-level
+						-- candidate sits above the cap. The uncapped path must
+						-- not see it -- the shift-invariant score could prefer
+						-- it and silently change settled realised outputs.
+						for _, nInt in ipairs({ nf - 1, nf, nf + 1 }) do
+							if not (dd == 0 and dD1 == 0 and nInt == nR0) then
+								consider(build(dInt, D1r + dD1, nInt))
 							end
 						end
 					end
 				end
 			end
+			table.sort(list, function(a, b) return a.s < b.s end)
+
+			local measured, loC, loP = 0, nil, nil
+			for i = 1, n do
+				local c = list[i].c
+				if not overCap(c) then
+					local pk = M.realisedPeakDb(c, fs)
+					if pk == pk and pk <= capDb then return c, pk end
+					if pk == pk and (loP == nil or pk < loP) then loC, loP = c, pk end
+					measured = measured + 1
+					if measured >= FIT_PEAK_MEASURES then break end
+				end
+			end
+			if loC then return loC, loP end
+			if n > 0 then return list[1].c, nil end
+			-- nothing usable in the box: fall through to the plain-round fallback
+		else
+			local best, bestc = 1 / 0, nil
+
+			local c0 = build(dInt0, D1r, nR0)
+			if c0 then
+				best, bestc = score(c0, 1 / 0), c0
+				if best <= FIT_ACCEPT_R then return bestc end
+			end
+			for _, dd in ipairs({ 0, -1, 1 }) do
+				local dInt = dInt0 + dd
+				if dInt >= 1 then
+					local nf = math.floor(gDC * dInt)
+					for _, dD1 in ipairs(FIT_DD1) do
+						for _, nInt in ipairs({ nf, nf + 1 }) do
+							if not (dd == 0 and dD1 == 0 and nInt == nR0) then
+								local c = build(dInt, D1r + dD1, nInt)
+								if c then
+									local e = score(c, best)
+									if e < best then best, bestc = e, c end
+								end
+							end
+						end
+					end
+				end
+			end
+			if bestc then return bestc end
 		end
-		if bestc then return bestc end
 	end
 
 	-- Fallback -- exactly the old behaviour: plain rounding, then pull the poles
@@ -904,31 +1004,120 @@ function M.designPair(fs, b1, b2)
 	cannot iterate and cannot exceed a bounded amount.
 	]]
 	--[[
-	The bound exists to stop a RUNAWAY, and a runaway needs iteration -- this is a
-	single pass, so the cap can be generous without being able to compound. It was
-	3 dB at first and that was too tight: a 80 Hz / +12 dB shelf needs about 6.7 dB
-	of correction, so capping at 3 shipped the remaining 3.71 dB as clipping.
+	CORRECT BY MEASUREMENT, NOT BY FORMULA.
 
-	Low shelves need the most because their poles sit closest to the unit circle,
-	where 16-bit quantisation spoils the pole/zero cancellation worst -- the same
-	reason the evaluation band stops at 40 Hz. Anything this removes is real level
-	and is charged to attenDb, so the cost is visible as make-up rather than hidden
-	as distortion.
+	This used to compute one scale factor from the measured excess, apply it,
+	re-quantise, and return -- never looking at what came out. Scaling by
+	10^(-p/20) removes p dB from the FLOAT design, but the result is quantised
+	again, and that second quantisation puts its own error back on top. So the
+	correction reduced the overshoot without ever eliminating it, and the comment
+	above claiming it re-quantised "until they are honestly under it" described a
+	loop that was not there.
+
+	MEASURED CONSEQUENCE (device + bench, 2026-08-05): bass 100 Hz / +6 dB / Q 2.0
+	realised +0.50794 dB and clipped -- reproduced on the bench to five decimals
+	off the device's own SBEQ-ANOMALY line. Across the control space 350 of 2170
+	bass settings realised above unity, worst +0.626 dB at 100 Hz / +14 dB / Q 1.6.
+
+	THE FIX IS THE ACCEPTANCE RULE, NOT A BIGGER NUMBER. A candidate is returned
+	only once its REALISED peak has been measured at or below unity. No formula is
+	trusted to have achieved that; the property is checked on the thing actually
+	being returned. Guarded by test_clipinvariant.lua, which sweeps both control
+	spaces and fails on any setting above 0 dB.
+
+	AND THE ACCEPTANCE RULE ALONE IS NOT ENOUGH -- the quantiser itself must be
+	told about the cap. fitQuantize scores candidates by a SHIFT-INVARIANT metric
+	(the dB spread of realised-vs-ideal, since attenDb absorbs uniform level), so
+	the level of the integers it returns is not controlled by the level of its
+	input. At low bass corners the DC sums are 2-5 LSB and the realised level
+	moves on a lattice whose steps dwarf the overshoot being corrected: measured
+	2026-08-05, scaling the input -2 dB vs -4 dB moved the realised peak 0.04 dB.
+	A loop that only rescales the input therefore plateaus (30 of 2170 bass
+	settings still clipped, worst +0.155 dB at 100 Hz / +13 dB / Q 1.4). So the
+	first pass re-fits AT THE ORIGINAL LEVEL with fitQuantize's peak-capped mode,
+	which selects among lattice candidates by shape subject to a MEASURED
+	realised peak <= 0; later passes add input scaling, which is what moves N1
+	finely (0.1 dB of scale is ~50 LSB of N1 -- the scale/N1 coupling the
+	fitQuantize notes identified as the reachable-candidate search this needs).
+
+	WHY THIS CANNOT RUN AWAY, WHICH THE EARLIER RETRY LOOP DID (75 dB on a 16 kHz
+	shelf, a NaN in N1 on a 4 kHz one -- both shipped a dead band):
+
+	  * every scale is computed from the ORIGINAL numerator against a CUMULATIVE
+	    total, so passes cannot compound each other;
+	  * that total is hard-capped at MAX_CORRECTION_DB no matter how many passes
+	    run, which is the bound the old loop lacked;
+	  * a non-finite measurement abandons the attempt and keeps the last good
+	    candidate rather than scaling again on a NaN;
+	  * the pass count is fixed and small.
+
+	The cap was 3 dB once and that was too tight: a 80 Hz / +12 dB shelf needs
+	about 6.7 dB, so capping at 3 shipped the remaining 3.71 dB as clipping. Low
+	shelves need the most because their poles sit closest to the unit circle, where
+	16-bit quantisation spoils the pole/zero cancellation worst -- the same reason
+	the evaluation band stops at 40 Hz. Anything removed is real level and is
+	charged to attenDb, so the cost shows up as make-up rather than as distortion.
 	]]
 	local MAX_CORRECTION_DB = 12.0
+	local MAX_PASSES        = 5
+	-- Ask for a hair more than the measured excess so a candidate that would land
+	-- exactly ON the line lands under it instead. Small enough to be inaudible,
+	-- large enough that convergence does not stall oscillating around zero.
+	local MARGIN_DB         = 0.05
 
-	-- Third return: the realised peak it measured, when that peak is still valid
-	-- for the returned coefficients (i.e. nothing was shaved). diag below reuses
-	-- it instead of paying for a second realisedPeakDb sweep on every knob click.
+	local function finite(v)
+		return v ~= nil and v == v and v ~= 1 / 0 and v ~= -1 / 0
+	end
+
+	-- Third return: the realised peak it measured, valid for the coefficients
+	-- actually returned. diag below reuses it instead of paying for a second
+	-- realisedPeakDb sweep on every knob click.
 	local function correct(x, c, budget)
 		if not x or not c then return c, 0, nil end
 		local p = M.realisedPeakDb(c, fs)
-		if p ~= p or p == 1 / 0 or p == -1 / 0 then return c, 0, nil end   -- non-finite
+		if not finite(p) then return c, 0, nil end
 		if p <= 0 then return c, 0, p end
-		if p > budget then p = budget end
-		local k = 10 ^ (-p / 20)
-		x.b0, x.b1, x.b2 = x.b0 * k, x.b1 * k, x.b2 * k
-		return finish(x), p, nil
+
+		-- The untouched numerator. Every pass scales THIS, never the running one.
+		local ob0, ob1, ob2 = x.b0, x.b1, x.b2
+		local applied, excess       = 0, p
+		local bestC, bestP, bestApp = nil, nil, 0
+
+		for pass = 1, MAX_PASSES do
+			-- Pass 1 spends NO level: it re-fits at the original scale under the
+			-- peak cap, and most overshoots are cured by a same-level lattice
+			-- neighbour. Level is spent only after measurement proves the lattice
+			-- holds nothing clean at the current scale.
+			if pass > 1 then
+				local want = applied + excess + MARGIN_DB
+				if want > budget then want = budget end
+				if want <= applied then break end      -- no budget left to spend
+				applied = want
+
+				local k = 10 ^ (-applied / 20)
+				x.b0, x.b1, x.b2 = ob0 * k, ob1 * k, ob2 * k
+			end
+
+			local cand, pk = fitQuantize(x, fs, 0)
+			if cand and pk == nil then pk = M.realisedPeakDb(cand, fs) end
+
+			if not cand or not finite(pk) then break end   -- keep the last good candidate
+			if not bestP or pk < bestP then bestC, bestP, bestApp = cand, pk, applied end
+			if pk <= 0 then return cand, applied, pk end   -- MEASURED under the line
+			excess = pk
+		end
+
+		--[[
+		Budget or passes exhausted with nothing measuring under unity. Return the
+		lowest-peak candidate found rather than the last one tried: it is the most
+		correction that was demonstrated to help, and it is strictly better than
+		the uncorrected section. diag reports its real peak, so _check still fires
+		and test_clipinvariant still fails -- this path stays VISIBLE rather than
+		quietly shipping a section that the invariant says should not exist.
+		]]
+		if bestC then return bestC, bestApp, bestP end
+		x.b0, x.b1, x.b2 = ob0, ob1, ob2
+		return c, 0, p
 	end
 
 	local t1, t2, pk1, pk2

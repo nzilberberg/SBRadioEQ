@@ -28,6 +28,13 @@ STAGE=/tmp/sbradioeq-stage
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 APPLET="$HERE/applet/SBRadioEQApplet.lua"
 
+# REAP-EXEMPT: deploy STOPS SqueezePlay on purpose -- killing every jive by name
+# is the intended act here, not a stranded-orphan cleanup, and the set-subtraction
+# reap that tools/check-device-reap.sh requires of bench.sh and run-suite.sh would
+# be wrong for it. The one remote script this runs, `jive _sbreq_check`, is a
+# sub-second parse check, and the restart path below kills all jive afterwards
+# anyway, so it cannot leave a long-lived orphan on the core.
+
 # accept-new, not no. This writes executable Lua as root; disabling the identity
 # check entirely would let anything answering on that address receive it. Trust
 # on first use, then verify -- a development convenience should not silently turn

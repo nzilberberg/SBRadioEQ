@@ -31,9 +31,13 @@
 #   os.clock() IS CPU TIME on this platform and reads 0.00. Framework:getTicks()
 #   is the only wall clock. That is why timing work needs --framework.
 #
-#   jive EXITS 0 EVEN ON A LUA ERROR. The traceback goes to stdout and the exit
-#   status is still success, so `cmd || fallback` never fires. This script scans
-#   the output for a traceback instead.
+#   jive USUALLY EXITS 0 EVEN ON A LUA ERROR -- but not always. The traceback
+#   goes to stdout and the exit status is usually still success, so
+#   `cmd || fallback` cannot be trusted to fire; this script scans the output
+#   for a traceback instead. And because jive CAN also exit non-zero, the
+#   capture below must not sit under `set -e` unprotected: the first version
+#   did, died at the OUT=$(...) assignment, and printed NOTHING -- the one
+#   run that most needed its output shown produced none at all.
 #
 # Gated by tools/check-no-detached-device.sh.
 
@@ -126,6 +130,41 @@ BENCHDIR=/tmp/sbradioeq-bench
 $SSH -n "$RADIO" "rm -rf $BENCHDIR && mkdir -p $BENCHDIR" >/dev/null
 $SCP "$SCRIPT" $DEPS "$RADIO:$BENCHDIR/" >/dev/null
 
+#[[ ⛔⛔ A LOCAL `timeout` DOES NOT BOUND THE REMOTE PROCESS.
+#
+# `timeout 540 ssh ...` kills the ssh CLIENT. The `jive` on the other end keeps
+# running, and the Radio has no `timeout` of its own to stop it (see the header).
+# So every run that times out leaves a CPU-BOUND ORPHAN on a single 360 MHz core.
+#
+# THIS IS SELF-REINFORCING, which is what makes it worth a guard rather than a
+# rule. Each orphan slows the next run, which makes IT more likely to time out,
+# which leaves another orphan. Measured 2026-08-05: three orphaned sweeps stacked
+# up (12m44s, 5m28s and 44s of CPU burned with nobody listening) and drove the
+# load average to 3.29 on a one-core box. An agent spent ninety minutes inside
+# that spiral, correctly noticing runs were slow and launching them "one at a
+# time to isolate the slow one" -- each isolation run adding another orphan.
+#
+# Everything measured in that state is worthless. This is the same hazard the
+# --framework busy-check already refuses to time through, but the plain path had
+# no check at all, and the plain path is what sweeps use.
+#
+# REAP ONLY WHAT THIS RUN STARTED. The PIDs present beforehand are somebody
+# else's business -- SqueezePlay itself is always among them, and a parallel
+# session's bench may be too. Killing by name would take down the player.
+#]]
+PRE_JIVE=$($SSH -n "$RADIO" "pidof jive" 2>/dev/null || true)
+pre_count=$(printf '%s' "$PRE_JIVE" | wc -w)
+if [ "$pre_count" -gt 1 ]; then
+	echo "bench: WARNING -- $pre_count jive processes were already running before this run." >&2
+	echo "  One is SqueezePlay; the rest are orphans from an earlier timed-out run or" >&2
+	echo "  another session. This device is oversubscribed and ANY measurement taken" >&2
+	echo "  now is unreliable. Clear them before trusting a number." >&2
+fi
+
+# RC captured, not trusted to abort: a non-zero jive exit under `set -e` used
+# to kill this script at the assignment, BEFORE the printf -- the run showed no
+# output at all, exactly when the traceback mattered most.
+RC=0
 OUT=$(
 if [ "$FRAMEWORK" -eq 1 ]; then
 	# jive.ui.* only resolves from the jive tree; copy in, run, clean up. The
@@ -137,9 +176,43 @@ if [ "$FRAMEWORK" -eq 1 ]; then
 else
 	$SSH -n "$RADIO" "cd $BENCHDIR && jive $NAME 2>&1"
 fi
-)
+) || RC=$?
 
 printf '%s\n' "$OUT"
+
+#[[ REAP. Any jive that appeared DURING this run and is still alive is ours and
+# is now unowned -- the client that was reading it is gone. 124 is timeout(1)'s
+# signal that it killed the client, which is the case that orphans; but a run
+# interrupted any other way strands the remote process just as thoroughly, so
+# reap on every non-zero exit.
+#
+# Set subtraction, not `pidof jive`: killing by name kills SqueezePlay.
+#]]
+if [ "$RC" -ne 0 ]; then
+	NOW_JIVE=$($SSH -n "$RADIO" "pidof jive" 2>/dev/null || true)
+	STRAY=""
+	for p in $NOW_JIVE; do
+		found=0
+		for q in $PRE_JIVE; do [ "$p" = "$q" ] && found=1 && break; done
+		[ "$found" -eq 0 ] && STRAY="$STRAY $p"
+	done
+	if [ -n "$STRAY" ]; then
+		echo ""
+		echo "bench: reaping remote process(es) this run started and left behind:$STRAY"
+		echo "  A local timeout kills the ssh client, not the jive on the device. Left"
+		echo "  alone these burn the only core and poison every later measurement."
+		$SSH -n "$RADIO" "kill -9$STRAY" >/dev/null 2>&1 || true
+	fi
+	echo ""
+	if [ "$RC" -eq 124 ]; then
+		echo "bench: TIMED OUT after ${SSH_TIMEOUT:-300}s -- output above is partial."
+		echo "  Shrink the sweep or raise SSH_TIMEOUT; do NOT just re-run, a device that"
+		echo "  timed out once is slower on the second attempt."
+	else
+		echo "bench: the remote command exited $RC -- output above is everything it produced"
+	fi
+	exit 1
+fi
 
 # jive exits 0 even when the script threw, so the exit status is worthless.
 # Detect the traceback instead and fail loudly, or a broken probe reads as a
