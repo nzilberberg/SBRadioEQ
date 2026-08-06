@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <extensions>
   <applets>
-    <applet name="SBRadioEQ" version="0.2.10" target="baby">
+    <applet name="SBRadioEQ" version="0.2.11" target="baby">
       <title lang="EN">Equalizer</title>
       <desc lang="EN">Two-band parametric EQ using the Radio's AIC3104 hardware effects filter. Adjusted with the knob; no CPU cost and no server required.</desc>
       <creator>nzilberberg</creator>
       <email>nzilberberg@gmail.com</email>
-      <url>https://github.com/nzilberberg/SBRadioEQ/releases/download/v0.2.10/SBRadioEQ-0.2.10.zip</url>
-      <sha>63b14662dfff7d4b3bcbc7c7ec8ef0aff879bcae</sha>
+      <url>https://github.com/nzilberberg/SBRadioEQ/releases/download/v0.2.11/SBRadioEQ-0.2.11.zip</url>
+      <sha>673faee741c1bb2d00d6f8e6c1a74bc8d8b48152</sha>
     </applet>
   </applets>
 </extensions>
