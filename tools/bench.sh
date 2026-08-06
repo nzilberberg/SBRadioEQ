@@ -152,6 +152,35 @@ $SCP "$SCRIPT" $DEPS "$RADIO:$BENCHDIR/" >/dev/null
 # else's business -- SqueezePlay itself is always among them, and a parallel
 # session's bench may be too. Killing by name would take down the player.
 #]]
+#[[ ⛔ VERIFY WHAT ARRIVED. A SILENT SCP IS NOT A DELIVERY.
+#
+# deploy.sh has checksummed every staged file against its local copy since it was
+# written; this script never did. It copied into a SHARED /tmp and trusted the
+# exit status, so "the code I am measuring" was an assumption, not a fact.
+#
+# That gap produced an unreproducible measurement: a sweep reported 30 of 2170
+# settings clipping for code that measures 0 of 2170 against checksum-verified
+# bytes, twice. The number was wrong and nothing in the tooling could say why --
+# a stale or partial file in the shared directory would look exactly like a real
+# result, because a sweep prints numbers either way.
+#
+# ⛔ IT IS NOT ENOUGH TO GET A NUMBER BACK. A bench measurement is only evidence
+# about the file you think you ran, and that is a claim requiring proof.
+#]]
+for f in "$SCRIPT" $DEPS; do
+	b=$(basename "$f")
+	want=$(md5sum "$f" 2>/dev/null | cut -d' ' -f1)
+	got=$($SSH -n "$RADIO" "md5sum $BENCHDIR/$b 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+	if [ -z "$want" ] || [ -z "$got" ] || [ "$want" != "$got" ]; then
+		echo "FAIL: $b did not arrive intact."
+		echo "  local  : ${want:-<could not digest>}"
+		echo "  device : ${got:-<missing>}"
+		echo "  Refusing to measure a file that is not the one you edited -- that"
+		echo "  is how a sweep produces a number nobody can reproduce."
+		exit 2
+	fi
+done
+
 PRE_JIVE=$($SSH -n "$RADIO" "pidof jive" 2>/dev/null || true)
 pre_count=$(printf '%s' "$PRE_JIVE" | wc -w)
 if [ "$pre_count" -gt 1 ]; then

@@ -89,11 +89,51 @@ fi
 # Record the PIDs first and subtract afterwards. Killing by name takes down
 # SqueezePlay, which is pid 1 of the set and always running.
 #]]
+#[[ ⛔ VERIFY WHAT ARRIVED. A SILENT SCP IS NOT A DELIVERY.
+#
+# Same reasoning as tools/bench.sh: deploy.sh has always checksummed its staged
+# files, this path never did, and it copies into a SHARED /tmp. A suite that runs
+# a stale module prints passes for code that is not in the tree -- which is worse
+# than a failure, because it is a green light for something never tested.
+#]]
+# ⛔ ONE ROUND TRIP, NOT ONE PER FILE. The first version of this ran an ssh per
+# file -- 28 password-authenticated connections to a 360 MHz box -- and pushed the
+# suite past ten minutes on its own. A verification step slow enough to be skipped
+# protects nothing; the check has to be cheap enough that nobody is tempted to
+# turn it off.
+remote_sums=$($SSH "$RADIO" "cd $REMOTE 2>/dev/null && md5sum *.lua 2>/dev/null" || true)
+mismatch=0
+for f in "$HERE"/lua/*.lua "$HERE"/test/*.lua; do
+	b=$(basename "$f")
+	want=$(md5sum "$f" 2>/dev/null | cut -d' ' -f1)
+	got=$(printf '%s\n' "$remote_sums" | awk -v n="$b" '$2 == n || $2 == "*"n { print $1; exit }')
+	if [ -z "$want" ] || [ -z "$got" ] || [ "$want" != "$got" ]; then
+		echo "FAIL(2): $b did not arrive intact (local=${want:-?} device=${got:-missing})"
+		mismatch=1
+	fi
+done
+if [ "$mismatch" -ne 0 ]; then
+	echo "  Refusing to run: a suite that measures files other than the ones you"
+	echo "  edited reports passes for code that is not in the tree."
+	exit 2
+fi
+
 PRE_JIVE=$($SSH "$RADIO" "pidof jive" 2>/dev/null || true)
 
+#[[ ⛔ KILLING jive IS NOT ENOUGH HERE -- KILL THE SHELL DRIVING THE LOOP.
+#
+# Measured 2026-08-05, the hard way: after this run was interrupted, killing the
+# running jive simply let the remote `for` loop start the NEXT test. A second
+# kill, a third jive. The loop is the orphan; each jive is only its current
+# child, and reaping children of a live loop is an infinite game.
+#
+# So the remote shell records its own pid before it starts iterating, and the
+# reap kills THAT first. Everything else follows from it.
+#]]
+LOOPPID="$REMOTE/loop.pid"
 echo "running in $REMOTE on $RADIO"
 RUN_RC=0
-out=$($SSH_RUN "$RADIO" "cd $REMOTE && for n in $WANT; do printf '%-20s ' \$n; /usr/bin/jive \$n 2>&1 | tail -1; done") || RUN_RC=$?
+out=$($SSH_RUN "$RADIO" "echo \$\$ > $LOOPPID; cd $REMOTE && for n in $WANT; do printf '%-20s ' \$n; /usr/bin/jive \$n 2>&1 | tail -1; done") || RUN_RC=$?
 
 if [ "$RUN_RC" -ne 0 ]; then
 	printf '%s\n' "$out"
@@ -104,8 +144,10 @@ if [ "$RUN_RC" -ne 0 ]; then
 		for q in $PRE_JIVE; do [ "$p" = "$q" ] && found=1 && break; done
 		[ "$found" -eq 0 ] && STRAY="$STRAY $p"
 	done
+	# The loop FIRST -- while it lives it replaces every jive killed below.
+	$SSH "$RADIO" "P=\$(cat $LOOPPID 2>/dev/null); [ -n \"\$P\" ] && kill -9 \$P 2>/dev/null; rm -f $LOOPPID" >/dev/null 2>&1 || true
 	if [ -n "$STRAY" ]; then
-		echo "reaping remote process(es) this run started and left behind:$STRAY"
+		echo "reaping the remote loop and the process(es) it left behind:$STRAY"
 		$SSH "$RADIO" "kill -9$STRAY" >/dev/null 2>&1 || true
 	fi
 	if [ "$RUN_RC" -eq 124 ]; then

@@ -1057,6 +1057,30 @@ function M.designPair(fs, b1, b2)
 	16-bit quantisation spoils the pole/zero cancellation worst -- the same reason
 	the evaluation band stops at 40 Hz. Anything removed is real level and is
 	charged to attenDb, so the cost shows up as make-up rather than as distortion.
+
+	MEASURED OUTCOME (2026-08-05, idle device, staged copy CHECKSUM-MATCHED to the
+	committed bytes at both ends): the full control-space sweep realises nothing
+	above unity -- bass 0 of 2170, treble 0 of 2480, test_clipinvariant 3/3 on the
+	Radio, negative control still firing at +25.037 dB so the reader is not blind.
+
+	⛔ A "30 of 2170, worst +0.155 dB at 100 Hz / +13 dB / Q 1.4" reading was
+	reported for THIS code during development and DOES NOT REPRODUCE. Two
+	independent runs against md5-verified bytes give zero. The earlier number is
+	withdrawn.
+
+	THE MECHANISM IS NOT KNOWN, and the guess that was first written here -- that
+	the sweeps behind it ran on an oversubscribed device -- IS WRONG AND WAS
+	REMOVED. Load changes timing, not arithmetic; a busy core cannot turn 0
+	clipping settings into 30. Accepting that explanation would have closed the
+	question with the cause still loose.
+
+	The leading candidate is that the staged file was not the file believed to be
+	staged: bench.sh copied into a shared /tmp and, unlike deploy.sh, never
+	checksummed what arrived. bench.sh and run-suite.sh now verify every staged
+	file against its local digest and abort on a mismatch, so this class of
+	unreproducible measurement is detectable rather than mysterious. That does not
+	prove it was the cause here -- it makes it impossible for it to be the cause
+	next time.
 	]]
 	local MAX_CORRECTION_DB = 12.0
 	local MAX_PASSES        = 5
