@@ -35,9 +35,11 @@ passes. The 269 bass settings that fail are interior points, scattered by
 quantisation, and the worst of them (+0.626 dB) is not at any boundary: it is
 100 Hz / +14 dB / Q 1.6. A hand-picked test cannot find those, and a test
 written by reading the code would have been written from the same belief that
-produced the bug. The control space is small enough to enumerate, so enumerate
-it -- that is the only method here that can fail for a reason the author did
-not already have in mind.
+produced the bug. So sweep the control space -- a sweep can fail for a reason
+the author did not already have in mind. (It is a coarse SAMPLE of the
+reachable settings, not an enumeration -- see the note at the grids below --
+which is why the sweep is regression evidence and the production boundary
+itself fails closed in designPair.)
 
 ⛔ THE THRESHOLD IS 0 dB, NOT PEAK_WARN_DB. The applet's black box warns above
 0.5 dB to keep syslog off the knob path, which is the right call for a runtime
@@ -69,8 +71,21 @@ local function diagOf(bf, bg, bq, tf, tg, tq)
 	return i.diag
 end
 
--- Ranges mirror uistate.M.RANGE. Frequency is sampled; gain and Q are walked at
--- the real control step, because that is the axis quantisation error rides on.
+--[[
+Ranges mirror uistate.M.RANGE. ⚠️ EVERY axis is SAMPLED, not enumerated. The
+real control steps (uistate.stepValue) are 0.5 dB per gain click, 0.05 per Q
+click, and 4% rounded to integer Hz per frequency click; this sweep walks gain
+at 1.0 dB (2x coarse), Q at 0.2 (4x coarse) and a handful of frequencies. So it
+visits a SAMPLE of the reachable settings -- REGRESSION EVIDENCE, not the
+safety mechanism. An earlier version of this comment claimed gain and Q were
+walked "at the real control step"; that was false, and it let this sampled
+sweep be trusted as the guarantee that correction exhaustion is unreachable.
+The invariant itself is enforced where it must be: designPair's FINAL CLIP GATE
+measures section 1 and the full cascade on the final quantised coefficients and
+refuses anything above unity (see eqdesign.lua and test_clipgate.lua). This
+sweep stays sampled for runtime reasons -- that is affordable precisely because
+the boundary fails closed.
+]]
 local BASS_F = { 100, 150, 200, 300, 400, 600, 800 }
 local TREB_F = { 1000, 1500, 2000, 3000, 4500, 7000, 11000, 16000 }
 

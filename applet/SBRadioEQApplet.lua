@@ -284,6 +284,46 @@ function _design(self)
 	local s = self:getSettings()
 	local c1, c2, i = designFrom(s)
 
+	--[[
+	⛔ FAIL CLOSED AT THE DESIGN BOUNDARY.
+
+	designPair measures the two hardware clip invariants -- section 1 solo, and
+	the full two-section cascade -- on the final quantised coefficients, and
+	returns ok = false (with FLAT sections already substituted for the offending
+	integers) when either measures above unity. That happens only when its
+	bounded correction search exhausted without finding a safe candidate; no
+	reachable setting is known to do it, which is exactly why the path must not
+	depend on the sampled sweep noticing.
+
+	On a refusal, keep the PREVIOUS good design: coefficients, attenDb, diag and
+	the drawn curve all continue to describe what is actually in the chip -- the
+	last state that measured safe. The knob edit that produced the refused
+	design is simply not applied: the curve stops following the knob,
+	SBEQ-DESIGNREFUSED records the refused settings and peaks (the settings in
+	this line belong to the REFUSED design; the SBEQ-APPLY that follows still
+	describes the kept one), and _check fires on the refused design's diag.
+	Only when there is no previous design to keep (first design of the session)
+	do the substituted FLAT sections go through: unity, safe, visibly doing
+	nothing.
+	]]
+	if not i.ok then
+		local d = i.diag or {}
+		log:warn("SBEQ-DESIGNREFUSED",
+		         " b=", s.bassFreq, "/", s.bassGain, "/", s.bassQ,
+		         " t=", s.trebFreq, "/", s.trebGain, "/", s.trebQ,
+		         " reason=", tostring(i.reason),
+		         " pk=", tostring(d.peak1), "/", tostring(d.peak2),
+		         " casc=", tostring(d.cascadeDb),
+		         " kept=", tostring(self.c1 ~= nil),
+		         " build=", BUILD)
+		if self.c1 then
+			self:_check(i.diag)     -- the refused design's alarm still fires
+			return
+		end
+		-- No previous design: fall through with the FLAT substitution; the
+		-- normal _check below sees the same diag.
+	end
+
 	self.c1, self.c2 = c1, c2
 	self.realised1, self.realised2 = i.realised1, i.realised2
 	self.attenDb = i.attenDb or 0
@@ -407,7 +447,10 @@ end
 
 function _check(self, d)
 	if not d then return end
-	local bad = d.flat1 or d.flat2
+	-- clipGuard: designPair's final clip gate refused the design (an invariant
+	-- measured above unity). Always anomalous, whatever the peak values read --
+	-- the gate threshold is 0 dB, below PEAK_WARN_DB by design.
+	local bad = d.flat1 or d.flat2 or d.clipGuard
 	             or (d.peak1 and d.peak1 > PEAK_WARN_DB)
 	             or (d.peak2 and d.peak2 > PEAK_WARN_DB)
 	             or ringing(d.r1, d.pf1) or ringing(d.r2, d.pf2)
@@ -422,6 +465,7 @@ function _check(self, d)
 	         " r1=", d.r1, " pf1=", tostring(d.pf1),
 	         " r2=", d.r2, " pf2=", tostring(d.pf2),
 	         " flat1=", tostring(d.flat1), " flat2=", tostring(d.flat2),
+	         " clip=", tostring(d.clipGuard), " casc=", tostring(d.cascadeDb),
 	         " | atten=", self.attenDb,
 	         " vol=", tostring(player and player:getVolume()),
 	         " build=", BUILD)

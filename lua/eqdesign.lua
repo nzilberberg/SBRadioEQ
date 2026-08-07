@@ -501,6 +501,59 @@ function M.realisedPeakDb(c, fs)
 end
 
 --[[
+Peak response of the QUANTISED two-section CASCADE, in dB.
+
+Same probe discipline as realisedPeakDb, applied to the product |H1|^2 * |H2|^2:
+the shape grid, the sub-40 Hz clip band, BOTH sections' pole frequencies (a
+needle in either section is a needle in the cascade), the Nyquist edge, and a
+local refinement around whichever point won. Either argument may be nil; a
+missing section contributes unity.
+
+A NaN response at any probe point reads as +inf, the same convention as
+fitQuantize's sieve: NaN must condemn, because skipping it would let a broken
+section measure as quiet.
+]]
+function M.cascadePeakDb(c1, c2, fs)
+	local v1 = c1 and { M.dequantize(c1) } or nil
+	local v2 = c2 and { M.dequantize(c2) } or nil
+	local bestM, bf = -1 / 0, 0
+
+	local function seen(m, f)
+		if m ~= m then bestM, bf = 1 / 0, f
+		elseif m > bestM then bestM, bf = m, f end
+	end
+	local function atRow(t, f)
+		local m = 1
+		if v1 then m = m * mag2At(v1[1], v1[2], v1[3], v1[4], v1[5], t) end
+		if v2 then m = m * mag2At(v2[1], v2[2], v2[3], v2[4], v2[5], t) end
+		seen(m, f)
+	end
+	local function at(f)
+		if not (f and f > 0 and f < fs / 2) then return end
+		local m = 1
+		if v1 then m = m * mag2Freq(v1[1], v1[2], v1[3], v1[4], v1[5], f, fs) end
+		if v2 then m = m * mag2Freq(v2[1], v2[2], v2[3], v2[4], v2[5], f, fs) end
+		seen(m, f)
+	end
+
+	local rowsG = trigFor(M.GRID, fs)
+	for i = 1, #M.GRID do atRow(rowsG[i], M.GRID[i]) end
+	local rowsS = trigFor(M.SUB_GRID, fs)               -- clipping below 40 Hz
+	for i = 1, #M.SUB_GRID do atRow(rowsS[i], M.SUB_GRID[i]) end
+	if v1 then at(M.poleFreq(v1[4], v1[5], fs)) end
+	if v2 then at(M.poleFreq(v2[4], v2[5], fs)) end
+	at(fs / 2 - 1)                                      -- Nyquist edge
+	if bf > 0 and bestM ~= 1 / 0 then
+		local lo, hi = bf * 0.85, bf * 1.15
+		for i = 0, 24 do at(lo + (hi - lo) * i / 24) end
+	end
+
+	if bestM == -1 / 0 then return -1 / 0, bf end
+	if bestM == 1 / 0 then return 1 / 0, bf end
+	return 10 * log10(bestM), bf
+end
+
+--[[
 FIT-QUANTISATION: pick the integers that realise the RESPONSE, not the ones
 nearest each float coefficient.
 
@@ -1318,8 +1371,9 @@ function M.designPair(fs, b1, b2)
 	⛔ THE ACCEPTANCE RULE IS UNCHANGED. Fewer passes does not mean trusting a
 	formula again: a candidate is still returned only after its realised peak has
 	been MEASURED at or below unity, and if none qualifies the lowest-peak
-	candidate is returned with its real peak so _check fires and
-	test_clipinvariant fails. The budget bounds the SEARCH, never the standard.
+	candidate is handed back with its real peak -- which the FINAL CLIP GATE
+	below then refuses at the boundary (FLAT substituted, ok = false), so it can
+	never be written. The budget bounds the SEARCH, never the standard.
 	]]
 	local MAX_PASSES = 3
 	local MARGIN_DB  = 0.5
@@ -1385,9 +1439,12 @@ function M.designPair(fs, b1, b2)
 		Budget or passes exhausted with nothing measuring under unity. Return the
 		lowest-peak candidate found rather than the last one tried: it is the most
 		correction that was demonstrated to help, and it is strictly better than
-		the uncorrected section. diag reports its real peak, so _check still fires
-		and test_clipinvariant still fails -- this path stays VISIBLE rather than
-		quietly shipping a section that the invariant says should not exist.
+		the uncorrected section. diag reports its real peak -- and the FINAL CLIP
+		GATE after designPair's diag block is what stops this section at the
+		boundary: an exhausted section still measuring above unity is refused
+		there (FLAT substituted, ok = false), never returned as an ordinary
+		successful design. This return keeps the best evidence of how close the
+		search got; it is no longer the last line of defence.
 		]]
 		if bestC then return bestC, bestApp, bestP end
 		x.b0, x.b1, x.b2, x.klin = ob0, ob1, ob2, oklin
@@ -1470,6 +1527,76 @@ function M.designPair(fs, b1, b2)
 	}
 
 	--[[
+	FINAL CLIP GATE -- the production boundary fails CLOSED here.
+
+	correct() above is bounded (MAX_PASSES, MAX_CORRECTION_DB). When it exhausts
+	without measuring a candidate at or below unity it returns the lowest-peak
+	candidate anyway -- deliberately, so the failure stays visible in diag. But
+	visibility is not prevention: this function used to return those
+	coefficients with ok = true, no caller consulted the design's verdict (the
+	applet's only .ok tests are hardware and level results), and the applet's
+	_check is an alarm, not a gate -- so a correction-exhausted over-unity
+	filter could reach the codec as an ordinary successful design. The
+	control-space sweep in test_clipinvariant.lua cannot close that hole: it
+	SAMPLES the controls (gain at 1.0 dB, Q at 0.2, against real UI steps of
+	0.5 and 0.05 -- see uistate.stepValue), and the settings that clipped in
+	v0.2.10 were scattered quantisation-dependent interior points, exactly what
+	a sample misses.
+
+	So the two REAL hardware invariants are measured here, on the exact
+	integers about to be returned, after every quantisation and correction:
+
+	  1. section 1's realised peak must not exceed unity -- the sections are
+	     cascaded in fixed point and section 1's output is section 2's input,
+	     so section 1 overflowing is an overflow regardless of what section 2
+	     does afterwards;
+	  2. the realised peak of the complete two-section cascade must not exceed
+	     unity.
+
+	Section 2 ON ITS OWN is deliberately not gated: a pair-normalised treble
+	section may legitimately sit above solo unity when section 1 attenuates
+	enough that the cascade stays under. Gating a stricter invented invariant
+	would reject working designs.
+
+	When at most one section is live the other is FLAT, whose response is the
+	frequency-independent constant FLAT_PEAK_DB, so the cascade peak is derived
+	exactly instead of paying a second sweep; the full product sweep runs only
+	when both sections are live -- about one realisedPeakDb-sized measurement
+	on the knob path, and no extra fitQuantize calls.
+
+	If either invariant fails, the offending integers do not leave this
+	function: both sections are replaced with FLAT (unity -- the band does
+	nothing, which is a visible disappointment, not a hazard), attenDb is
+	zeroed -- FLAT applies no cut, and charging make-up for a filter that is
+	not running would raise the volume over unfiltered audio, the loud-audio
+	failure this project has already shipped once -- and the result carries
+	ok = false with a reason, so the applet can keep the previous good filter
+	instead of writing anything. The measured peaks stay in diag for the
+	flight recorder. Guarded by test_clipgate.lua, which forces the exhaustion
+	path and requires the refusal.
+	]]
+	local cascadeDb
+	if r1 and r2 and not caught1 and not caught2 then
+		cascadeDb = M.cascadePeakDb(q1, q2, fs)
+	elseif r1 and not caught1 then
+		cascadeDb = diag.peak1 + FLAT_PEAK_DB
+	elseif r2 and not caught2 then
+		cascadeDb = diag.peak2 + FLAT_PEAK_DB
+	else
+		cascadeDb = 2 * FLAT_PEAK_DB
+	end
+	diag.cascadeDb = cascadeDb
+
+	-- `not (x <= 0)`, never `x > 0`: every comparison against NaN is false, so
+	-- a NaN peak must read as OVER the line, not under it.
+	local clipped = (not (diag.peak1 <= 0)) or (not (cascadeDb <= 0))
+	if clipped then
+		q1, q2 = M.FLAT, M.FLAT
+		diag.clipGuard = true
+		k1, k2 = 0, 0
+	end
+
+	--[[
 	LEVEL TRIM: attenDb is the make-up the volume restores, so the correct value
 	is the one that best restores the REQUEST given the integers the chip
 	actually got -- not the amount the ideal design was scaled by.
@@ -1488,7 +1615,7 @@ function M.designPair(fs, b1, b2)
 	would swing the volume for a band that is not running.
 	]]
 	local trim = 0
-	if (r1 or r2) and not (caught1 or caught2) then
+	if (r1 or r2) and not (caught1 or caught2) and not clipped then
 		--[[ Ratio domain, like the fit score: the signed dB error at f is
 		10*log10(P) for P = product over sections of realised/ideal |H|^2, and
 		log10 is monotone -- so the extremes of P are the extremes of the dB
@@ -1556,9 +1683,14 @@ function M.designPair(fs, b1, b2)
 		return { b0 = b0, b1 = b1, b2 = b2, a1 = a1, a2 = a2 }
 	end
 
+	-- ok is the design's own verdict, and it is no longer hardcoded: a design
+	-- the final clip gate refused reports ok = false, and what it returns in
+	-- that case is the FLAT substitution, never the offending integers.
 	return q1, q2,
 	       { attenDb = atten, k1 = k1, k2 = k2, trimDb = trim,
-	         realised1 = view(q1), realised2 = view(q2), ok = true,
+	         realised1 = view(q1), realised2 = view(q2),
+	         ok = not clipped,
+	         reason = clipped and "realised peak above unity" or nil,
 	         diag = diag }
 end
 
